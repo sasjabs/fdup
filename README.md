@@ -18,14 +18,15 @@ pip install .
 
 Requirements:
 
-- Python `>=3.9`
-- `numpy >= 2.2.1`
-- `numba >= 0.64.0`
-- `rasterio >= 1.5.0`
+- Python `>=3.10`
+- `numpy >= 1.21.3`
+- `numba >= 0.55.0`
+- `rasterio >= 1.3.0`
 
 ## Python API usage
 
 ```python
+# Import call can take 10-15s since all @njit functions are compiled at import time
 from fdup.upscalers import DMM, NSA, COTAT
 
 # DMM
