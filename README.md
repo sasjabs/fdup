@@ -76,13 +76,13 @@ fdup dmm --flowacc flowacc.tif -o out_dmm.tif -k 20
 fdup nsa --flowacc flowacc.tif -o out_nsa.tif -k 20
 ```
 
-Note: `fdup` command is only accessible if Python environment with `fdup` package installed is activated
-
 #### COTAT
 
 ```bash
 fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o out_cotat.tif -k 20 --area-threshold 10
 ```
+
+Note: `fdup` command is only accessible if Python environment with `fdup` package installed is activated
 
 ## I/O
 
