@@ -18,10 +18,10 @@ dependencies = [
 ]
 classifiers = [
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11"
-    "Programming Language :: Python :: 3.12"
-    "Programming Language :: Python :: 3.13"
-    "Programming Language :: Python :: 3.14"
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
 license = "GPL-3.0-or-later"
@@ -31,7 +31,7 @@ license-files = ["LICENSE"]
 fdup = "fdup.cli:main"
 
 [project.urls]
-Source Code = "https://github.com/sasjabs/fdup"
+Source = "https://github.com/sasjabs/fdup"
 
 [tool.setuptools.packages.find]
 include = ["fdup*"]
