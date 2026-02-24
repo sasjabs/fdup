@@ -76,13 +76,15 @@ fdup dmm --flowacc flowacc.tif -o out_dmm.tif -k 20
 fdup nsa --flowacc flowacc.tif -o out_nsa.tif -k 20
 ```
 
+Note: `fdup` command is only accessible if Python environment with `fdup` package installed is activated
+
 #### COTAT
 
 ```bash
 fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o out_cotat.tif -k 20 --area-threshold 10
 ```
 
-## IO
+## I/O
 
 - `--flowdir`: input fine-resolution D8 flow direction raster file (for COTAT only).
 - `--flowacc`: input fine-resolution flow accumulation raster file derived from flow direction raster.
@@ -93,7 +95,7 @@ fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o out_cotat.tif -k 20 --
 
 - `-k`: positive integer scaling factor for resulting grid. Output grid cells will be `k` times larger than input ones. Note: for DMM, `k` should be an even number.
 
-- `--area-threshold`/`area_threshold`: tracing area (flow accumulation) increase threshold (for COTAT only). Defines when to stop tracing original fine-resolution flow directions: larger values of threshold tend to increase the number of diagonal flow directions.
+- `--area-threshold`: drainage area (flow accumulation) increase threshold (for COTAT only). Defines when to stop tracing original fine-resolution flow directions: with larger values of threshold the algorithm tends to more often prefer diagonal flow directions (SE, SW, NW, NE) over orthogonal ones (E, S, W, N).
 
 ## Input data conventions
 
