@@ -10,9 +10,16 @@
 
 ## Installation
 
+From PyPI:
+
+```bash
+pip install fdup
+```
+
 From the repository root:
 
 ```bash
+git clone https://github.com/sasjabs/fdup .
 pip install .
 ```
 
