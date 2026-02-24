@@ -5,16 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fdup"
 version = "0.1.0"
+authors = [
+    {name="Mikhail Uzhegov", email="uzhegovmv@my.msu.ru"}
+]
 description = "Flow direction upscaling toolkit (DMM, NSA, COTAT)"
+readme = "Readme.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.21.3",
     "numba>=0.55.0",
     "rasterio>=1.3.0",
 ]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11"
+    "Programming Language :: Python :: 3.12"
+    "Programming Language :: Python :: 3.13"
+    "Programming Language :: Python :: 3.14"
+    "Operating System :: OS Independent",
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 
 [project.scripts]
 fdup = "fdup.cli:main"
+
+[project.urls]
+Source Code = "https://github.com/sasjabs/fdup"
 
 [tool.setuptools.packages.find]
 include = ["fdup*"]
