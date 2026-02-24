@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fdup"
+version = "0.1.0"
+description = "Flow direction upscaling toolkit (DMM, NSA, COTAT)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy >= 2.2.1",
+    "numba >= 0.64.0",
+    "rasterio >= 1.5.0",
+]
+
+[project.scripts]
+fdup = "fdup.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fdup*"]
