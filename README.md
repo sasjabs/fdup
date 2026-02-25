@@ -1,6 +1,6 @@
 # fdup
 
-`fdup` is a [numba](https://numba.pydata.org/)-accelerated Python toolkit containing algorithms for upscaling D8 flow direction grids. 
+`fdup` is a Python toolkit containing algorithms for upscaling D8 flow direction grids.
 
 ## Currently implemented algorithms
 
@@ -19,7 +19,8 @@ pip install fdup
 From the repository root:
 
 ```bash
-git clone https://github.com/sasjabs/fdup .
+git clone https://github.com/sasjabs/fdup
+cd fdup
 pip install .
 ```
 
