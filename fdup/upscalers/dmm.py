@@ -423,17 +423,9 @@ class DMM(BaseUpscaler):
     positive even integer.
     """
 
-    def _pad_with_shift(self, array, k, shift, pad_value):
-        """Pad to a multiple of *k*, then add a symmetric half-cell frame."""
-        array = self._pad_to_multiple(array, k, pad_value)
-        if shift:
-            array = np.pad(
-                array,
-                pad_width=((shift, shift), (shift, shift)),
-                mode="constant",
-                constant_values=pad_value,
-            )
-        return array
+    def __init__(self):
+        super().__init__()
+        self._valid_padded = None
 
     def upscale(self, k):
         """Run DMM upscaling with scaling factor *k* (positive even int).
@@ -442,22 +434,35 @@ class DMM(BaseUpscaler):
         """
         if not isinstance(k, int) or k <= 0 or k % 2 != 0:
             raise ValueError("Scaling factor k must be a positive even integer")
-        if self._flowacc_raw is None:
+        if self._flowacc_raw is None and self._flowacc_padded is None:
             raise RuntimeError("No data loaded. Call load_flowacc() first.")
 
-        shift = k // 2
         ndv = self._flowacc_nodata
+        pad_val = ndv if ndv is not None else 0
 
-        nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
-        valid_mask = ~nodata_mask
+        if self._flowacc_raw is not None:
+            # First call: build padded state from raw arrays, then free raws.
+            nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
+            self._orig_shape = self._flowacc_raw.shape
+            self._flowacc_padded = self._pad_to_multiple(self._flowacc_raw, k, pad_val)
+            self._valid_padded = self._pad_to_multiple(
+                (~nodata_mask).astype(np.uint8), k, 0)
+            self._flowacc_raw = None
+            self._padded_k = k
+        elif k != self._padded_k:
+            # k changed: crop to original extent and re-pad.
+            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k, pad_val)
+            self._valid_padded = self._repad(self._valid_padded, self._orig_shape, k, 0)
+            self._padded_k = k
 
-        flowacc = self._pad_with_shift(
-            self._flowacc_raw, k, shift,
-            ndv if ndv is not None else 0,
-        )
-        valid_mask = self._pad_with_shift(
-            valid_mask.astype(np.uint8), k, shift, 0,
-        ).astype(bool)
+        # Apply the half-cell shift frame required by the A-grid/B-grid scheme.
+        shift = k // 2
+        flowacc = np.pad(self._flowacc_padded,
+                         ((shift, shift), (shift, shift)),
+                         mode="constant", constant_values=pad_val)
+        valid_mask = np.pad(self._valid_padded,
+                            ((shift, shift), (shift, shift)),
+                            mode="constant", constant_values=0).astype(bool)
 
         mrows = flowacc.shape[0] // k - 1
         mcols = flowacc.shape[1] // k - 1

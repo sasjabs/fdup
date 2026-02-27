@@ -21,6 +21,9 @@ class BaseUpscaler:
     def __init__(self):
         self._flowacc_raw = None
         self._flowacc_nodata = None
+        self._flowacc_padded = None
+        self._orig_shape = None
+        self._padded_k = None
         self._profile = None
         self.cells_ = None
         self.k_ = None
@@ -79,6 +82,12 @@ class BaseUpscaler:
                 constant_values=pad_value,
             )
         return array
+
+    @staticmethod
+    def _repad(padded, orig_shape, k, pad_value=0):
+        """Crop *padded* back to *orig_shape* then re-pad it to a multiple of *k*."""
+        r, c = orig_shape
+        return BaseUpscaler._pad_to_multiple(padded[:r, :c], k, pad_value)
 
     # ------------------------------------------------------------------
     # Output

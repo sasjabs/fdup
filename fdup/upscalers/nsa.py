@@ -113,6 +113,10 @@ _warmup_jit()
 class NSA(BaseUpscaler):
     """Network Scaling Algorithm flow direction upscaler."""
 
+    def __init__(self):
+        super().__init__()
+        self._nodata_mask_padded = None
+
     def upscale(self, k):
         """Run NSA upscaling with scaling factor *k* (positive int).
 
@@ -120,20 +124,30 @@ class NSA(BaseUpscaler):
         """
         if not isinstance(k, int) or k <= 0:
             raise ValueError("Scaling factor k must be a positive integer")
-        if self._flowacc_raw is None:
+        if self._flowacc_raw is None and self._flowacc_padded is None:
             raise RuntimeError("No data loaded. Call load_flowacc() first.")
 
-        ndv = self._flowacc_nodata
+        if self._flowacc_raw is not None:
+            # First call: build padded state from the raw array, then free it.
+            ndv = self._flowacc_nodata
+            nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
+            fa = self._flowacc_raw.copy()
+            fa[nodata_mask] = 0
+            self._orig_shape = self._flowacc_raw.shape
+            self._flowacc_padded = self._pad_to_multiple(fa, k, pad_value=0)
+            self._nodata_mask_padded = self._pad_to_multiple(
+                nodata_mask.astype(np.uint8), k, pad_value=1)
+            self._flowacc_raw = None
+            self._padded_k = k
+        elif k != self._padded_k:
+            # k changed: crop to original extent and re-pad.
+            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k)
+            self._nodata_mask_padded = self._repad(
+                self._nodata_mask_padded, self._orig_shape, k, pad_value=1)
+            self._padded_k = k
 
-        nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
-
-        flowacc = self._flowacc_raw.copy()
-        flowacc[nodata_mask] = 0
-
-        flowacc     = self._pad_to_multiple(flowacc, k, pad_value=0)
-        nodata_mask = self._pad_to_multiple(nodata_mask, k, pad_value=True)
-
-        flowacc_aggr, nodata_aggr = _aggregate_jit(flowacc, nodata_mask, k)
+        flowacc_aggr, nodata_aggr = _aggregate_jit(
+            self._flowacc_padded, self._nodata_mask_padded.astype(bool), k)
         cells = _flowdir_jit(
             flowacc_aggr, nodata_aggr,
             DIR_DROW, DIR_DCOL, DIR_DIST, DIR_CODES,

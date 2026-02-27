@@ -208,6 +208,7 @@ class COTAT(BaseUpscaler):
         super().__init__()
         self._flowdir_raw = None
         self._flowdir_nodata = None
+        self._flowdir_padded = None
 
     def load_flowdir(self, path):
         """Load a fine-grid flow-direction raster (single band).
@@ -247,21 +248,32 @@ class COTAT(BaseUpscaler):
         """
         if not isinstance(k, int) or k <= 0:
             raise ValueError("Scaling factor k must be a positive integer")
-        if self._flowdir_raw is None:
+        if self._flowdir_raw is None and self._flowdir_padded is None:
             raise RuntimeError("No flow direction data. Call load_flowdir() first.")
-        if self._flowacc_raw is None:
+        if self._flowacc_raw is None and self._flowacc_padded is None:
             raise RuntimeError("No flow accumulation data. Call load_flowacc() first.")
 
-        flowdir_array = self._flowdir_raw
-        flowacc_array = self._flowacc_raw
-        orig_nrows, orig_ncols = flowdir_array.shape
+        if self._flowdir_raw is not None:
+            # First call: pad both arrays, apply flowacc nodata mask, then free raws.
+            self._orig_shape = self._flowdir_raw.shape
+            self._flowdir_padded = self._pad_to_multiple(self._flowdir_raw, k, pad_value=0)
+            fa = self._flowacc_raw
+            ndv = self._flowacc_nodata
+            if ndv is not None:
+                fa = np.where(fa == ndv, 0, fa)
+            self._flowacc_padded = self._pad_to_multiple(fa, k, pad_value=0)
+            self._flowdir_raw = None
+            self._flowacc_raw = None
+            self._padded_k = k
+        elif k != self._padded_k:
+            # Subsequent call with a different k: crop to original extent, re-pad.
+            self._flowdir_padded = self._repad(self._flowdir_padded, self._orig_shape, k)
+            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k)
+            self._padded_k = k
 
-        flowdir_padded = self._pad_to_multiple(flowdir_array, k, pad_value=0)
-        flowacc_padded = self._pad_to_multiple(flowacc_array, k, pad_value=0)
-
-        ndv = self._flowacc_nodata
-        if ndv is not None:
-            flowacc_padded = np.where(flowacc_padded == ndv, 0, flowacc_padded)
+        flowdir_padded = self._flowdir_padded
+        flowacc_padded = self._flowacc_padded
+        orig_nrows, orig_ncols = self._orig_shape
 
         nrows, ncols = flowdir_padded.shape
         mrows = nrows // k
@@ -275,7 +287,9 @@ class COTAT(BaseUpscaler):
                 flowdir_padded[:orig_nrows, :orig_ncols] != self._flowdir_nodata
             )
         valid_reshaped = valid.reshape(mrows, k, mcols, k)
+        del valid
         null_cells = ~np.any(valid_reshaped, axis=(1, 3))
+        del valid_reshaped
 
         # Assign outlet pixels
         outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
@@ -298,6 +312,8 @@ class COTAT(BaseUpscaler):
             DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
             mrows, mcols,
         )
+
+        del null_cells
 
         # Fix intersections
         _fix_intersections_numba(cells, outlet_coords, flowacc_padded, mrows, mcols)
