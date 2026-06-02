@@ -3,6 +3,6 @@ build/*
 *.egg-info/*
 dist/*
 _docs/
-_evals_raw/*
+_utils_and_evals_raw/*
 _docs/*
 .vscode/*
