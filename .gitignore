@@ -2,6 +2,6 @@
 build/*
 *.egg-info/*
 dist/*
-.vscode/*
+_docs/
 _evals_raw/*
 _docs/*
