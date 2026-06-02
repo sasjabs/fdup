@@ -5,6 +5,7 @@ Usage examples::
     fdup dmm   --flowacc flowacc.tif -o out.tif -k 4
     fdup nsa   --flowacc flowacc.tif -o out.tif -k 8
     fdup cotat --flowdir fdir.tif --flowacc facc.tif -o out.tif -k 4 --area-threshold 0.5
+    fdup cotat --flowdir fdir.tif --flowacc facc.tif -o out.tif -k 4 --mufp 1.5
 """
 
 import argparse
@@ -30,7 +31,7 @@ def _run_cotat(args):
     upscaler = COTAT()
     upscaler.load_flowdir(args.flowdir)
     upscaler.load_flowacc(args.flowacc)
-    upscaler.upscale(k=args.k, area_threshold=args.area_threshold)
+    upscaler.upscale(k=args.k, area_threshold=args.area_threshold, mufp=args.mufp)
     upscaler.save(args.output)
 
 
@@ -67,6 +68,13 @@ def main(argv=None):
         type=float,
         default=0.0,
         help="Area threshold for COTAT tracing (default: 0.0)",
+    )
+    p_cotat.add_argument(
+        "--mufp",
+        type=float,
+        default=None,
+        help="Minimum Upstream Flow Path (in fine-grid pixels) enabling the "
+             "COTAT+ outlet-selection scheme (default: disabled / plain COTAT)",
     )
     p_cotat.set_defaults(func=_run_cotat)
 
