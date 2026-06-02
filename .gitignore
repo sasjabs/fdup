@@ -3,3 +3,5 @@ build/*
 *.egg-info/*
 dist/*
 .vscode/*
+_evals_raw/*
+_docs/*
