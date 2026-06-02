@@ -5,3 +5,4 @@ dist/*
 _docs/
 _evals_raw/*
 _docs/*
+.vscode/*
