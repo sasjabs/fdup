@@ -10,12 +10,22 @@ The plain COTAT outlet (largest-upstream-area pixel) is used when no MUFP
 value is supplied; otherwise the COTAT+ outlet-selection scheme is applied.
 """
 
+from __future__ import annotations
+
+import math
+
 import numpy as np
+from affine import Affine
 from numba import njit, prange
 
-from fdup.base import (
-    BaseUpscaler, DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
-    DIR_DROW, DIR_DCOL,
+from fdup._core.d8 import (
+    DECODE_DC, DECODE_DR, DECODE_VALID, ENCODE_DIR,
+    DIR_DCOL, DIR_DROW,
+)
+from fdup._core.types import Grid, GridType
+from fdup._core.validation import (
+    check_crs_match, check_dtype, check_shape_match,
+    check_transform_match, check_type,
 )
 
 _SQRT2 = 1.4142135623730951
@@ -403,187 +413,170 @@ def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
 # JIT warm-up
 # =========================================================================
 
-def _warmup():
-    """Pre-compile all numba kernels for uint32, float32 and float64."""
+def _warmup(dtype=np.float64):
+    """Pre-compile all numba kernels for *dtype*."""
     flowdir_ndv = np.uint8(255)
 
-    for fa_dtype in (np.uint32, np.float32, np.float64):
-        # Plain COTAT outlets + tracing + intersection fixing (2x2 cell grid).
-        k = 1
-        mrows = mcols = 2
-        n = mrows * k
-        flowdir = np.zeros((n, n), dtype=np.uint8)
-        flowacc = np.ones((n, n), dtype=fa_dtype)
-        null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
-        outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
-        cells = np.full((mrows, mcols), 255, dtype=np.uint8)
+    # Plain COTAT outlets + tracing + intersection fixing (2x2 cell grid).
+    k = 1
+    mrows = mcols = 2
+    n = mrows * k
+    flowdir = np.zeros((n, n), dtype=np.uint8)
+    flowacc = np.ones((n, n), dtype=dtype)
+    null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
+    outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
+    cells = np.full((mrows, mcols), 255, dtype=np.uint8)
 
-        _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
-                            mrows, mcols, k, n, n, flowdir_ndv, True,
-                            False, 0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
-                            DIR_DROW, DIR_DCOL)
-        _assign_all_directions(flowdir, flowacc, outlet_coords, cells,
-                               null_cells, k, n, n, flowdir_ndv, True,
-                               0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
-                               ENCODE_DIR, mrows, mcols)
-        _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols)
+    _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
+                        mrows, mcols, k, n, n, flowdir_ndv, True,
+                        False, 0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
+                        DIR_DROW, DIR_DCOL)
+    _assign_all_directions(flowdir, flowacc, outlet_coords, cells,
+                           null_cells, k, n, n, flowdir_ndv, True,
+                           0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
+                           ENCODE_DIR, mrows, mcols)
+    _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols)
 
-        # COTAT+ MUFP outlet selection (single 2x2 cell, eastward flow).
-        k = 2
-        mrows = mcols = 1
-        n = 2
-        flowdir = np.ones((n, n), dtype=np.uint8)
-        flowacc = np.array([[1, 2], [1, 2]], dtype=fa_dtype)
-        null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
-        outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
+    # COTAT+ MUFP outlet selection (single 1x1 coarse cell with k=2).
+    k = 2
+    mrows = mcols = 1
+    n = 2
+    flowdir = np.ones((n, n), dtype=np.uint8)
+    flowacc = np.array([[1, 2], [1, 2]], dtype=dtype)
+    null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
+    outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
 
-        _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
-                            mrows, mcols, k, n, n, flowdir_ndv, True,
-                            True, 0.5, DECODE_DR, DECODE_DC, DECODE_VALID,
-                            DIR_DROW, DIR_DCOL)
-
-
-_warmup()
+    _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
+                        mrows, mcols, k, n, n, flowdir_ndv, True,
+                        True, 0.5, DECODE_DR, DECODE_DC, DECODE_VALID,
+                        DIR_DROW, DIR_DCOL)
 
 
 # =========================================================================
-# COTAT upscaler class
+# COTAT public function
 # =========================================================================
 
-class COTAT(BaseUpscaler):
+_FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float64)
+
+
+def COTAT(
+    flowdir: Grid,
+    flowacc: Grid,
+    k: int,
+    *,
+    area_threshold: float = 0.0,
+    mufp: float | None = None,
+) -> Grid:
     """COTAT / COTAT+ flow direction upscaler.
 
-    Requires both a fine-grid flow-direction raster and a flow-accumulation
-    raster.  Pass ``mufp`` to ``upscale()`` to enable the COTAT+ outlet
-    selection refinement; omit it for plain COTAT behaviour.
+    Parameters
+    ----------
+    flowdir:
+        Fine-grid flow-direction raster.  Must be ``GridType.FlowDir``.
+    flowacc:
+        Fine-grid flow-accumulation raster.  Must be ``GridType.FlowAcc`` with
+        a supported dtype (int32/uint32/int64/uint64/float32/float64).
+        Must match *flowdir* in shape, transform, and CRS.
+    k:
+        Upscaling factor.  Must be a positive integer.
+    area_threshold:
+        Minimum accumulated-area gain required at a downstream cell outlet
+        for that cell to be selected as the receiving cell while tracing.
+    mufp:
+        Minimum Upstream Flow Path (in fine-grid pixel side lengths) for the
+        COTAT+ outlet-selection scheme.  When ``None`` (default), the original
+        COTAT outlet selection (largest-upstream-area pixel) is used.
+
+    Returns
+    -------
+    Grid
+        Coarse flow-direction grid (``GridType.FlowDir``, uint8).  Shape is
+        ``(ceil(H/k), ceil(W/k))`` and the pixel size is ``k`` times the
+        fine-grid pixel size.
+
+    Notes
+    -----
+    Both input arrays are copied into ``(ceil(H/k)*k, ceil(W/k)*k)`` buffers
+    before being passed to the JIT kernels.  The flowdir buffer is filled with
+    255 (nodata sentinel) and the flowacc buffer with 0 in the padded region.
+    The ``_pixel_valid`` kernel helper still uses ``orig_nrows / orig_ncols``
+    for bounds checking so padded pixels are correctly excluded.
     """
+    check_type(flowdir, GridType.FlowDir)
+    check_type(flowacc, GridType.FlowAcc)
+    check_dtype(flowacc, allowed=_FLOWACC_DTYPES)
+    check_shape_match(flowdir, flowacc)
+    check_transform_match(flowdir, flowacc)
+    check_crs_match(flowdir, flowacc)
+    if not isinstance(k, int) or k <= 0:
+        raise ValueError("COTAT requires a positive integer k")
 
-    def __init__(self):
-        super().__init__()
-        self._flowdir_raw = None
-        self._flowdir_nodata = None
-        self._flowdir_padded = None
+    orig_nrows, orig_ncols = flowdir.shape
 
-    def load_flowdir(self, path):
-        """Load a fine-grid flow-direction raster (single band).
+    # Allocate ceil-padded buffers.  Extra cells are nodata (fd=255, fa=0).
+    ceil_rows = math.ceil(orig_nrows / k)
+    ceil_cols = math.ceil(orig_ncols / k)
+    pad_rows  = ceil_rows * k
+    pad_cols  = ceil_cols * k
+    mrows     = ceil_rows
+    mcols     = ceil_cols
 
-        The rasterio profile from this raster is used as the reference
-        profile for ``save()``.
-        """
-        array, profile, nodata = self._read_raster(path)
-        self._flowdir_raw = array
-        self._flowdir_nodata = nodata
-        self._profile = profile
+    fd_buf = np.full((pad_rows, pad_cols), np.uint8(255), dtype=np.uint8)
+    fd_buf[:orig_nrows, :orig_ncols] = flowdir.array
 
-    def load_flowacc(self, path):
-        """Load a flow-accumulation raster without overwriting the profile.
-
-        The spatial reference profile is taken from the flowdir raster
-        (set via ``load_flowdir``), matching the original COTAT behaviour.
-        """
-        array, profile, nodata = self._read_raster(path)
-        self._flowacc_raw = array
-        self._flowacc_nodata = nodata
-        if self._profile is None:
-            self._profile = profile
-
-    def upscale(self, k, area_threshold=0.0, mufp=None):
-        """Run COTAT / COTAT+ upscaling.
-
-        Parameters
-        ----------
-        k : int
-            Scaling factor (positive integer).
-        area_threshold : float
-            Minimum accumulated-area gain required at a downstream cell outlet
-            for that cell to be selected as the receiving cell while tracing.
-        mufp : float, optional
-            Minimum Upstream Flow Path (in fine-grid pixel side lengths) for the
-            COTAT+ outlet-selection scheme. When ``None`` (default), the original
-            COTAT outlet selection (largest-upstream-area pixel) is used.
-
-        Returns a copy of the resulting uint8 flow-direction array.
-        """
-        if not isinstance(k, int) or k <= 0:
-            raise ValueError("Scaling factor k must be a positive integer")
-        if self._flowdir_raw is None and self._flowdir_padded is None:
-            raise RuntimeError("No flow direction data. Call load_flowdir() first.")
-        if self._flowacc_raw is None and self._flowacc_padded is None:
-            raise RuntimeError("No flow accumulation data. Call load_flowacc() first.")
-
-        if self._flowdir_raw is not None:
-            # First call: pad both arrays, apply flowacc nodata mask, then free raws.
-            self._orig_shape = self._flowdir_raw.shape
-            self._flowdir_padded = self._pad_to_multiple(self._flowdir_raw, k, pad_value=0)
-            fa = self._flowacc_raw
-            ndv = self._flowacc_nodata
-            if ndv is not None:
-                fa = np.where(fa == ndv, 0, fa)
-            self._flowacc_padded = self._pad_to_multiple(fa, k, pad_value=0)
-            self._flowdir_raw = None
-            self._flowacc_raw = None
-            self._padded_k = k
-        elif k != self._padded_k:
-            # Subsequent call with a different k: crop to original extent, re-pad.
-            self._flowdir_padded = self._repad(self._flowdir_padded, self._orig_shape, k)
-            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k)
-            self._padded_k = k
-
-        flowdir_padded = self._flowdir_padded
-        flowacc_padded = self._flowacc_padded
-        orig_nrows, orig_ncols = self._orig_shape
-
-        nrows, ncols = flowdir_padded.shape
-        mrows = nrows // k
-        mcols = ncols // k
-
-        # Build cell-level null mask from flowdir validity
-        valid = np.zeros((nrows, ncols), dtype=bool)
-        valid[:orig_nrows, :orig_ncols] = True
-        if self._flowdir_nodata is not None:
-            valid[:orig_nrows, :orig_ncols] &= (
-                flowdir_padded[:orig_nrows, :orig_ncols] != self._flowdir_nodata
-            )
-        valid_reshaped = valid.reshape(mrows, k, mcols, k)
-        del valid
-        null_cells = ~np.any(valid_reshaped, axis=(1, 3))
-        del valid_reshaped
-
-        if self._flowdir_nodata is not None:
-            has_ndv = True
-            flowdir_ndv = flowdir_padded.dtype.type(self._flowdir_nodata)
+    ndv = flowacc.meta.nodata
+    fa  = flowacc.array.copy()
+    if ndv is not None:
+        if isinstance(ndv, float) and np.isnan(ndv):
+            fa[np.isnan(fa)] = 0
         else:
-            has_ndv = False
-            flowdir_ndv = flowdir_padded.dtype.type(0)
+            fa[fa == ndv] = 0
 
-        use_mufp = mufp is not None
-        mufp_val = float(mufp) if use_mufp else 0.0
+    fa_buf = np.zeros((pad_rows, pad_cols), dtype=flowacc.array.dtype)
+    fa_buf[:orig_nrows, :orig_ncols] = fa
 
-        # Assign outlet pixels (plain COTAT or COTAT+ MUFP scheme)
-        outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
-        _assign_all_outlets(
-            flowdir_padded, flowacc_padded, null_cells, outlet_coords,
-            mrows, mcols, k, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
-            use_mufp, mufp_val, DECODE_DR, DECODE_DC, DECODE_VALID,
-            DIR_DROW, DIR_DCOL,
-        )
+    # Build coarse null-cell mask: a cell is null when all its fine pixels
+    # are either in the padded region or carry flowdir nodata (255).
+    valid = np.zeros((pad_rows, pad_cols), dtype=bool)
+    valid[:orig_nrows, :orig_ncols] = fd_buf[:orig_nrows, :orig_ncols] != 255
+    null_cells = ~np.any(
+        valid.reshape(mrows, k, mcols, k), axis=(1, 3)
+    )
+    del valid
 
-        # Assign cell directions
-        cells = np.full((mrows, mcols), 255, dtype=np.uint8)
+    flowdir_ndv = np.uint8(255)
+    has_ndv     = True
 
-        _assign_all_directions(
-            flowdir_padded, flowacc_padded, outlet_coords,
-            cells, null_cells, k, orig_nrows, orig_ncols,
-            flowdir_ndv, has_ndv, area_threshold,
-            DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
-            mrows, mcols,
-        )
+    use_mufp = mufp is not None
+    mufp_val = float(mufp) if use_mufp else 0.0
 
-        del null_cells
+    outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
+    _assign_all_outlets(
+        fd_buf, fa_buf, null_cells, outlet_coords,
+        mrows, mcols, k, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+        use_mufp, mufp_val, DECODE_DR, DECODE_DC, DECODE_VALID,
+        DIR_DROW, DIR_DCOL,
+    )
 
-        # Fix intersections
-        _fix_intersections_numba(cells, outlet_coords, flowacc_padded, mrows, mcols)
+    cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
+    _assign_all_directions(
+        fd_buf, fa_buf, outlet_coords,
+        cells, null_cells, k, orig_nrows, orig_ncols,
+        flowdir_ndv, has_ndv, area_threshold,
+        DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
+        mrows, mcols,
+    )
 
-        self.cells_ = cells
-        self.k_ = k
-        return self.cells_.copy()
+    del null_cells
+
+    _fix_intersections_numba(cells, outlet_coords, fa_buf, mrows, mcols)
+
+    t = flowdir.meta.transform
+    out_transform = Affine(t.a * k, t.b, t.c, t.d, t.e * k, t.f)
+
+    return Grid.create(
+        array=cells,
+        type=GridType.FlowDir,
+        transform=out_transform,
+        crs=flowdir.meta.crs,
+    )

@@ -1,5 +1,5 @@
-from .dmm import DMM
-from .nsa import NSA
-from .cotat import COTAT
+from fdup.upscalers.cotat import COTAT
+from fdup.upscalers.dmm import DMM
+from fdup.upscalers.nsa import NSA
 
-__all__ = ["DMM", "NSA", "COTAT"]
+__all__ = ["COTAT", "DMM", "NSA"]

@@ -3,10 +3,18 @@ Implements NSA (Network Scaling Algorithm)
 for flow direction upscaling by Fekete et al. (2001)
 https://doi.org/10.1029/2001WR900024
 """
+
+from __future__ import annotations
+
+import math
+
 import numpy as np
+from affine import Affine
 from numba import njit
 
-from fdup.base import BaseUpscaler, DIR_CODES, DIR_DROW, DIR_DCOL, DIR_DIST
+from fdup._core.d8 import DIR_CODES, DIR_DCOL, DIR_DIST, DIR_DROW
+from fdup._core.types import Grid, GridType
+from fdup._core.validation import check_dtype, check_type
 
 
 # =========================================================================
@@ -87,72 +95,94 @@ def _flowdir_jit(flowacc_aggr, nodata_aggr,
 # JIT warm-up
 # =========================================================================
 
-def _warmup_jit():
-    """Trigger JIT compilation for uint32, float32 and float64 inputs."""
+def _warmup(dtype=np.float64):
+    """Trigger JIT compilation for the given *dtype*."""
     k       = 2
     mock_fa = np.array([[1,  2,  3,  4],
                          [5,  6,  7,  8],
                          [9,  10, 11, 12],
-                         [13, 14, 15, 16]], dtype=np.int32)
+                         [13, 14, 15, 16]], dtype=dtype)
     mock_nd = np.zeros((4, 4), dtype=np.bool_)
     mock_nd[0, 0] = True
-
-    for dtype in (np.uint32, np.float32, np.float64):
-        fa       = mock_fa.astype(dtype)
-        aggr, nd = _aggregate_jit(fa, mock_nd, k)
-        _flowdir_jit(aggr, nd, DIR_DROW, DIR_DCOL, DIR_DIST, DIR_CODES)
-
-
-_warmup_jit()
+    aggr, nd = _aggregate_jit(mock_fa, mock_nd, k)
+    _flowdir_jit(aggr, nd, DIR_DROW, DIR_DCOL, DIR_DIST, DIR_CODES)
 
 
 # =========================================================================
-# NSA upscaler class
+# NSA public function
 # =========================================================================
 
-class NSA(BaseUpscaler):
-    """Network Scaling Algorithm flow direction upscaler."""
+_FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float64)
 
-    def __init__(self):
-        super().__init__()
-        self._nodata_mask_padded = None
 
-    def upscale(self, k):
-        """Run NSA upscaling with scaling factor *k* (positive int).
+def NSA(flowacc: Grid, k: int) -> Grid:
+    """Network Scaling Algorithm flow direction upscaler (Fekete et al. 2001).
 
-        Returns a copy of the resulting uint8 flow-direction array.
-        """
-        if not isinstance(k, int) or k <= 0:
-            raise ValueError("Scaling factor k must be a positive integer")
-        if self._flowacc_raw is None and self._flowacc_padded is None:
-            raise RuntimeError("No data loaded. Call load_flowacc() first.")
+    Parameters
+    ----------
+    flowacc:
+        Fine-grid flow-accumulation raster.  Must be ``GridType.FlowAcc`` with
+        a supported dtype (int32/uint32/int64/uint64/float32/float64).
+    k:
+        Upscaling factor.  Must be a positive integer.
 
-        if self._flowacc_raw is not None:
-            # First call: build padded state from the raw array, then free it.
-            ndv = self._flowacc_nodata
-            nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
-            fa = self._flowacc_raw.copy()
-            fa[nodata_mask] = 0
-            self._orig_shape = self._flowacc_raw.shape
-            self._flowacc_padded = self._pad_to_multiple(fa, k, pad_value=0)
-            self._nodata_mask_padded = self._pad_to_multiple(
-                nodata_mask.astype(np.uint8), k, pad_value=1)
-            self._flowacc_raw = None
-            self._padded_k = k
-        elif k != self._padded_k:
-            # k changed: crop to original extent and re-pad.
-            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k)
-            self._nodata_mask_padded = self._repad(
-                self._nodata_mask_padded, self._orig_shape, k, pad_value=1)
-            self._padded_k = k
+    Returns
+    -------
+    Grid
+        Coarse flow-direction grid (``GridType.FlowDir``, uint8).  Shape is
+        ``(ceil(H/k), ceil(W/k))`` and the pixel size is ``k`` times the
+        fine-grid pixel size.
 
-        flowacc_aggr, nodata_aggr = _aggregate_jit(
-            self._flowacc_padded, self._nodata_mask_padded.astype(bool), k)
-        cells = _flowdir_jit(
-            flowacc_aggr, nodata_aggr,
-            DIR_DROW, DIR_DCOL, DIR_DIST, DIR_CODES,
-        )
+    Notes
+    -----
+    The fine-grid array is pre-copied into a ``(ceil(H/k)*k, ceil(W/k)*k)``
+    buffer filled with zeros (nodata sentinel = 0).  Partial boundary cells
+    beyond the original extent are marked nodata via the nodata-mask buffer
+    (filled with ``True``).  The existing JIT kernels operate on this uniform
+    buffer; no changes to the kernel bodies are required.
+    """
+    check_type(flowacc, GridType.FlowAcc)
+    check_dtype(flowacc, allowed=_FLOWACC_DTYPES)
+    if not isinstance(k, int) or k <= 0:
+        raise ValueError("NSA requires a positive integer k")
 
-        self.cells_ = cells
-        self.k_ = k
-        return self.cells_.copy()
+    H, W   = flowacc.array.shape
+    ndv    = flowacc.meta.nodata
+
+    # Build nodata_mask for the original array.
+    if ndv is None:
+        nodata_mask = np.zeros((H, W), dtype=bool)
+    elif isinstance(ndv, float) and np.isnan(ndv):
+        nodata_mask = np.isnan(flowacc.array)
+    else:
+        nodata_mask = flowacc.array == ndv
+
+    # Pre-allocate ceil-padded buffers.  Extra cells beyond the original
+    # extent are treated as nodata (nd_buf=True, fa_buf=0).
+    ceil_rows = math.ceil(H / k)
+    ceil_cols = math.ceil(W / k)
+
+    fa_zeroed = flowacc.array.copy()
+    fa_zeroed[nodata_mask] = 0
+
+    fa_buf = np.zeros((ceil_rows * k, ceil_cols * k), dtype=flowacc.array.dtype)
+    nd_buf = np.ones((ceil_rows * k, ceil_cols * k), dtype=np.bool_)
+
+    fa_buf[:H, :W] = fa_zeroed
+    nd_buf[:H, :W] = nodata_mask
+
+    flowacc_aggr, nodata_aggr = _aggregate_jit(fa_buf, nd_buf, k)
+    cells = _flowdir_jit(
+        flowacc_aggr, nodata_aggr,
+        DIR_DROW, DIR_DCOL, DIR_DIST, DIR_CODES,
+    )
+
+    t = flowacc.meta.transform
+    out_transform = Affine(t.a * k, t.b, t.c, t.d, t.e * k, t.f)
+
+    return Grid.create(
+        array=cells,
+        type=GridType.FlowDir,
+        transform=out_transform,
+        crs=flowacc.meta.crs,
+    )

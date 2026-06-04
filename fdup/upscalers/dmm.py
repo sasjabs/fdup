@@ -4,10 +4,17 @@ for flow direction upscaling by Olivera et al. (2002)
 https://doi.org/10.1029/2001WR000726
 """
 
+from __future__ import annotations
+
 import numpy as np
+from affine import Affine
 from numba import njit, prange
 
-from fdup.base import BaseUpscaler, DIR_DROW, DIR_DCOL, DECODE_DR, DECODE_DC, ENCODE_DIR
+from fdup._core.d8 import (
+    DECODE_DC, DECODE_DR, DIR_DCOL, DIR_DROW, ENCODE_DIR,
+)
+from fdup._core.types import Grid, GridType
+from fdup._core.validation import check_dtype, check_type
 
 
 # =========================================================================
@@ -382,15 +389,14 @@ def _nb_enforce_nodata(cells, valid_mask, k, shift, mrows, mcols):
 # JIT warm-up
 # =========================================================================
 
-def _warmup_jit(dtype=np.float64):
-    """Force ahead-of-time compilation of every JIT kernel."""
+def _warmup(dtype=np.float64):
+    """Force ahead-of-time compilation of every JIT kernel for *dtype*."""
     k     = 2
     shift = 1
     n     = k * 2 + 2 * shift
     mrows = mcols = n // k - 1
 
-    flowacc = np.arange(n * n, dtype=dtype).reshape(n, n)
-
+    flowacc    = np.arange(n * n, dtype=dtype).reshape(n, n)
     valid_mask = np.ones((n, n), dtype=np.bool_)
     valid_mask[0, :]  = False
     valid_mask[-1, :] = False
@@ -408,77 +414,86 @@ def _warmup_jit(dtype=np.float64):
     _nb_enforce_nodata        (cells, valid_mask, k, shift, mrows, mcols)
 
 
-for _dtype in (np.uint32, np.float32, np.float64):
-    _warmup_jit(_dtype)
-
-
 # =========================================================================
-# DMM upscaler class
+# DMM public function
 # =========================================================================
 
-class DMM(BaseUpscaler):
-    """Double Maximum Method flow direction upscaler.
+_FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float64)
 
-    Uses an A-grid / B-grid displacement mechanism.  Requires *k* to be a
-    positive even integer.
+
+def DMM(flowacc: Grid, k: int) -> Grid:
+    """Double Maximum Method flow direction upscaler (Olivera et al. 2002).
+
+    Parameters
+    ----------
+    flowacc:
+        Fine-grid flow-accumulation raster.  Must be ``GridType.FlowAcc`` with
+        a supported dtype (int32/uint32/int64/uint64/float32/float64).
+    k:
+        Upscaling factor.  Must be a positive **even** integer (the A/B-grid
+        half-cell shift requires an even k).
+
+    Returns
+    -------
+    Grid
+        Coarse flow-direction grid (``GridType.FlowDir``, uint8).  Shape is
+        ``(H // k, W // k)`` and the pixel size is ``k`` times the fine-grid
+        pixel size.
     """
+    check_type(flowacc, GridType.FlowAcc)
+    check_dtype(flowacc, allowed=_FLOWACC_DTYPES)
+    if not isinstance(k, int) or k <= 0 or k % 2 != 0:
+        raise ValueError("DMM requires even k")
 
-    def __init__(self):
-        super().__init__()
-        self._valid_padded = None
+    ndv = flowacc.meta.nodata
+    if ndv is None:
+        pad_val = 0
+        nodata_mask = np.zeros(flowacc.array.shape, dtype=bool)
+    elif isinstance(ndv, float) and np.isnan(ndv):
+        pad_val = 0
+        nodata_mask = np.isnan(flowacc.array)
+    else:
+        pad_val = ndv
+        nodata_mask = flowacc.array == ndv
 
-    def upscale(self, k):
-        """Run DMM upscaling with scaling factor *k* (positive even int).
+    # Apply the A/B-grid half-cell shift: pad by k//2 on all four sides.
+    # This is an algorithmic requirement of DMM, not a multiple-of-k pad.
+    shift = k // 2
+    fa_shifted = np.pad(
+        flowacc.array,
+        ((shift, shift), (shift, shift)),
+        mode="constant",
+        constant_values=pad_val,
+    )
+    valid_shifted = np.pad(
+        (~nodata_mask).astype(np.uint8),
+        ((shift, shift), (shift, shift)),
+        mode="constant",
+        constant_values=0,
+    ).astype(bool)
 
-        Returns a copy of the resulting uint8 flow-direction array.
-        """
-        if not isinstance(k, int) or k <= 0 or k % 2 != 0:
-            raise ValueError("Scaling factor k must be a positive even integer")
-        if self._flowacc_raw is None and self._flowacc_padded is None:
-            raise RuntimeError("No data loaded. Call load_flowacc() first.")
+    nrows, ncols = fa_shifted.shape
+    mrows = nrows // k - 1   # == flowacc.shape[0] // k
+    mcols = ncols // k - 1   # == flowacc.shape[1] // k
+    cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
 
-        ndv = self._flowacc_nodata
-        pad_val = ndv if ndv is not None else 0
+    fa_shifted    = np.ascontiguousarray(fa_shifted)
+    valid_shifted = np.ascontiguousarray(valid_shifted)
 
-        if self._flowacc_raw is not None:
-            # First call: build padded state from raw arrays, then free raws.
-            nodata_mask = self._build_nodata_mask(self._flowacc_raw, ndv)
-            self._orig_shape = self._flowacc_raw.shape
-            self._flowacc_padded = self._pad_to_multiple(self._flowacc_raw, k, pad_val)
-            self._valid_padded = self._pad_to_multiple(
-                (~nodata_mask).astype(np.uint8), k, 0)
-            self._flowacc_raw = None
-            self._padded_k = k
-        elif k != self._padded_k:
-            # k changed: crop to original extent and re-pad.
-            self._flowacc_padded = self._repad(self._flowacc_padded, self._orig_shape, k, pad_val)
-            self._valid_padded = self._repad(self._valid_padded, self._orig_shape, k, 0)
-            self._padded_k = k
+    _nb_assign_cell_directions(fa_shifted, valid_shifted, cells, k, shift,
+                               mrows, mcols, DIR_DROW, DIR_DCOL, ENCODE_DIR)
+    _nb_fix_counter_flows(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols)
+    _nb_fix_intersections(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols, 4)
+    _nb_fix_small_cycles(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols, 4,
+                         DECODE_DR, DECODE_DC)
+    _nb_enforce_nodata(cells, valid_shifted, k, shift, mrows, mcols)
 
-        # Apply the half-cell shift frame required by the A-grid/B-grid scheme.
-        shift = k // 2
-        flowacc = np.pad(self._flowacc_padded,
-                         ((shift, shift), (shift, shift)),
-                         mode="constant", constant_values=pad_val)
-        valid_mask = np.pad(self._valid_padded,
-                            ((shift, shift), (shift, shift)),
-                            mode="constant", constant_values=0).astype(bool)
+    t = flowacc.meta.transform
+    out_transform = Affine(t.a * k, t.b, t.c, t.d, t.e * k, t.f)
 
-        mrows = flowacc.shape[0] // k - 1
-        mcols = flowacc.shape[1] // k - 1
-        cells = np.full((mrows, mcols), self.DIR_NODATA, dtype=np.uint8)
-
-        flowacc    = np.ascontiguousarray(flowacc)
-        valid_mask = np.ascontiguousarray(valid_mask)
-
-        _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcols,
-                                   DIR_DROW, DIR_DCOL, ENCODE_DIR)
-        _nb_fix_counter_flows(cells, flowacc, valid_mask, k, shift, mrows, mcols)
-        _nb_fix_intersections(cells, flowacc, valid_mask, k, shift, mrows, mcols, 4)
-        _nb_fix_small_cycles(cells, flowacc, valid_mask, k, shift, mrows, mcols, 4,
-                             DECODE_DR, DECODE_DC)
-        _nb_enforce_nodata(cells, valid_mask, k, shift, mrows, mcols)
-
-        self.cells_ = cells
-        self.k_ = k
-        return self.cells_.copy()
+    return Grid.create(
+        array=cells,
+        type=GridType.FlowDir,
+        transform=out_transform,
+        crs=flowacc.meta.crs,
+    )

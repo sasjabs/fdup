@@ -43,3 +43,6 @@ for _code, _dr, _dc in _D8:
     ENCODE_DIR[_dr + 1, _dc + 1] = _code
 
 del _code, _dr, _dc
+
+# Compass labels in D8 iteration order (E→SE→S→SW→W→NW→N→NE)
+COMPASS_ORDER = ("E", "SE", "S", "SW", "W", "NW", "N", "NE")
