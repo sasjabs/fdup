@@ -6,3 +6,4 @@ _docs/
 _utils_and_evals_raw/*
 _docs/*
 .vscode/*
+.cursor/*
