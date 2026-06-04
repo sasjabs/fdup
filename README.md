@@ -51,41 +51,49 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 
 ### `fdup.io`
 
-| Function | Description |
-|---|---|
-| `read(path, grid_type)` | Read a GeoTIFF into a `Grid`. Validates dtype against the requested `GridType`. |
-| `write(grid, path, *, overwrite, compress)` | Write a `Grid` to a GeoTIFF. |
+
+| Function                                    | Description                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------------- |
+| `read(path, grid_type)`                     | Read a GeoTIFF into a `Grid`. Validates dtype against the requested `GridType`. |
+| `write(grid, path, *, overwrite, compress)` | Write a `Grid` to a GeoTIFF.                                                    |
+
 
 ### `fdup.upscalers`
 
-| Function | Description |
-|---|---|
-| `DMM(flowacc, k)` | Double Maximum Method. Requires even `k`. Returns `GridType.FlowDir`. |
-| `NSA(flowacc, k)` | Network Scaling Algorithm. Returns `GridType.FlowDir`. |
-| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. Returns `GridType.FlowDir`. |
+
+| Function                                              | Description                                                           |
+| ----------------------------------------------------- | --------------------------------------------------------------------- |
+| `DMM(flowacc, k)`                                     | Double Maximum Method. Requires even `k`. Returns `GridType.FlowDir`. |
+| `NSA(flowacc, k)`                                     | Network Scaling Algorithm. Returns `GridType.FlowDir`.                |
+| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. Returns `GridType.FlowDir`.                           |
+
 
 ### `fdup.utils`
 
-| Function | Description |
-|---|---|
-| `d8(dem, spherical=True)` | Compute ESRI D8 flow directions from a DEM. |
-| `flow_accumulation(flowdir, *, area=True)` | Compute upstream flow accumulation (area in km² or raw cell count). |
-| `snap_pour_cell(flowacc, x, y, radius)` | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`. |
-| `delineate_watershed(flowdir, pour_row, pour_col)` | BFS upstream delineation from a pour cell. Returns `GridType.Mask`. |
-| `disaggregate_mask(mask, k)` | Expand a coarse mask by factor `k` (nearest-neighbour). |
-| `match_grids(reference, other)` | Crop/pad `other` to the same extent as `reference`. |
-| `mask_area(mask)` | Total area of True-valued cells in km². |
-| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)` | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates. |
+
+| Function                                                   | Description                                                                                    |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `d8(dem, spherical=True)`                                  | Compute ESRI D8 flow directions from a DEM.                                                    |
+| `flow_accumulation(flowdir, *, area=True)`                 | Compute upstream flow accumulation (area in km² or raw cell count).                            |
+| `snap_pour_cell(flowacc, x, y, radius)`                    | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`. |
+| `delineate_watershed(flowdir, pour_row, pour_col)`         | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                            |
+| `disaggregate_mask(mask, k)`                               | Expand a coarse mask by factor `k` (nearest-neighbour).                                        |
+| `match_grids(reference, other)`                            | Crop/pad `other` to the same extent as `reference`.                                            |
+| `mask_area(mask)`                                          | Total area of True-valued cells in km².                                                        |
+| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)` | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates.         |
+
 
 ### `fdup.evals`
 
-| Function | Description |
-|---|---|
-| `compare_watersheds(mask1, mask2)` | Squared Ochiai overlap index + intersection mask. |
-| `compare_flowdir(flowdir_fine, flowdir_coarse, seeds, *, alpha, shuffle, strict_upstream, cascade)` | Per-seed flow-direction accuracy scores. |
-| `huac(flowacc_fine, flowdir_coarse, flowacc_coarse, x, y, radius, *, upstream_area_threshold)` | Headwater upstream-area comparison: returns an error raster and a DataFrame. |
-| `flowdir_windrose(flowdir, mask)` | Direction-frequency windrose for a flow direction grid. |
-| `windrose_emd(wr1, wr2)` | Earth Mover's Distance between two windroses. |
+
+| Function                                                                                            | Description                                                                    |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `compare_watersheds(mask1, mask2)`                                                                  | Squared Ochiai overlap index + intersection mask.                              |
+| `compare_flowdir(flowdir_fine, flowdir_coarse, seeds, *, alpha, shuffle, strict_upstream, cascade)` | Per-seed flow-direction accuracy scores.                                       |
+| `huac(flowacc_fine, flowdir_coarse, flowacc_coarse, x, y, radius, *, upstream_area_threshold)`      | Hiearchical upstream-area comparison: returns an error raster and a DataFrame. |
+| `flowdir_windrose(flowdir, mask)`                                                                   | Direction-frequency windrose for a flow direction grid.                        |
+| `windrose_emd(wr1, wr2)`                                                                            | Earth Mover's Distance between two windroses.                                  |
+
 
 ### Top-level names
 
@@ -163,7 +171,7 @@ fdup river-tree --flowdir flowdir.tif --flowacc flowacc.tif \
 
 ### `snap_pour_cell`: radius is in CRS units
 
-`radius` is a **Euclidean distance in the grid's CRS units**, not necessarily metres.
+`radius` is deliberately a **Euclidean distance in the grid's CRS units**, not necessarily metres.
 For geographic grids (e.g. EPSG:4326) the unit is **degrees**.
 A radius of `0.5` on an EPSG:4326 grid means 0.5 degrees, not 0.5 km.
 To use metric radii, reproject the grid to a projected CRS first.

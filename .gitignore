@@ -7,3 +7,4 @@ _utils_and_evals_raw/*
 _docs/*
 .vscode/*
 .cursor/*
+examples/api_demo.ipynb
