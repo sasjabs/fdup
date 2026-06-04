@@ -243,9 +243,9 @@ def river_tree(
         ``GridType.FlowAcc``; dtype must be one of the supported FlowAcc dtypes.
     mask :
         Optional ``GridType.Mask`` (bool), same shape/transform as *flowdir*.
-        When provided, segments whose entire path lies outside the mask are
-        pruned; surviving segments are re-densified so ``tree_grid == i+1``
-        corresponds to ``seeds[i]``.
+        When provided, only cells where the mask is ``True`` are eligible for
+        tracing — the upstream walk stops at mask boundaries so no river
+        segment can cross into masked-out areas.
 
     Returns
     -------
@@ -272,6 +272,13 @@ def river_tree(
     dir_arr = flowdir.array
     seeds_dtype = _make_seeds_dtype(acc.dtype)
     nodata_val  = _get_nodata_val(acc, flowacc.meta.nodata)
+
+    # ---- apply mask to flow-direction before any tracing ------------------
+    # Zeroing out-of-mask cells in dir_arr means the upstream walk in
+    # _nb_trace stops at the mask boundary (dv == 0 is treated as nodata).
+    if mask is not None:
+        mask_arr = mask.array
+        dir_arr  = np.where(mask_arr, dir_arr, np.uint8(0))
 
     # ---- collect valid cells (D8 direction + non-nodata acc) --------------
     valid_mask = (dir_arr > 0) & (dir_arr <= 128)
@@ -322,37 +329,6 @@ def river_tree(
         seeds["ncells"]        = seeds_geom[:n, 4]
         seeds["acc"]           = acc_buf[:n]
         seeds["length_m"]      = len_buf[:n]
-
-    # ---- optional mask pruning + re-densification -----------------------
-    if mask is not None and n > 0:
-        mask_arr = mask.array
-
-        # For each cell owned by a segment, check whether it overlaps the mask.
-        seed_has_masked = np.zeros(n, dtype=np.bool_)
-        valid_tree  = tree_raw > 0
-        tree_ids    = tree_raw[valid_tree].astype(np.intp) - 1   # 0-based
-        mask_hits   = mask_arr[valid_tree]
-        np.maximum.at(seed_has_masked, tree_ids, mask_hits)
-
-        surviving = np.where(seed_has_masked)[0]   # 0-based indices of kept seeds
-        n_surv    = len(surviving)
-
-        # Build old-1-based → new-1-based remapping (0 = pruned)
-        id_map = np.zeros(n + 1, dtype=np.uint32)
-        for new_id, old_idx in enumerate(surviving, start=1):
-            id_map[int(old_idx) + 1] = np.uint32(new_id)
-        tree_raw = id_map[tree_raw]
-
-        new_seeds = np.empty(n_surv, dtype=seeds_dtype)
-        if n_surv > 0:
-            new_seeds["mouth_row"]     = seeds["mouth_row"][surviving]
-            new_seeds["mouth_col"]     = seeds["mouth_col"][surviving]
-            new_seeds["headwater_row"] = seeds["headwater_row"][surviving]
-            new_seeds["headwater_col"] = seeds["headwater_col"][surviving]
-            new_seeds["ncells"]        = seeds["ncells"][surviving]
-            new_seeds["acc"]           = seeds["acc"][surviving]
-            new_seeds["length_m"]      = seeds["length_m"][surviving]
-        seeds = new_seeds
 
     return (
         Grid.create(

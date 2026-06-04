@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
+from fdup._core.d8 import DIR_DROW, DIR_DCOL, ENCODE_DIR
 from fdup._core.geodesy import get_cell_areas
 from fdup._core.types import Grid, GridType
 from fdup._core.validation import check_type
@@ -22,54 +23,72 @@ from affine import Affine
 
 
 # ---------------------------------------------------------------------------
+# BFS neighbour tables (module-level so Numba sees pre-known types)
+# ---------------------------------------------------------------------------
+
+# Row/col offsets for the 8 D8 neighbours, in DIR iteration order.
+_BFS_DR = DIR_DROW.astype(np.int32)
+_BFS_DC = DIR_DCOL.astype(np.int32)
+
+# For each direction i the "back" code: the D8 code a neighbour at offset
+# (_BFS_DR[i], _BFS_DC[i]) must carry to flow *into* the current cell.
+# Derived from ENCODE_DIR by looking up the opposite offset (-dr, -dc).
+_BFS_BACK = np.array(
+    [ENCODE_DIR[-int(r) + 1, -int(c) + 1] for r, c in zip(DIR_DROW, DIR_DCOL)],
+    dtype=np.uint8,
+)
+
+
+# ---------------------------------------------------------------------------
 # BFS kernel
 # ---------------------------------------------------------------------------
 
 @njit(cache=True)
-def _bfs(flowdir: np.ndarray, pour_row: int, pour_col: int) -> np.ndarray:
+def _bfs(
+    flowdir: np.ndarray,
+    pour_row: np.int32,
+    pour_col: np.int32,
+    drs: np.ndarray,
+    dcs: np.ndarray,
+    back: np.ndarray,
+) -> np.ndarray:
     """Upstream BFS from a pour cell.
 
     Traces backwards through the D8 grid to find all cells that drain
     through ``(pour_row, pour_col)``.
-
-    The reverse-direction lookup: a neighbour at offset (dr, dc) drains
-    *into* the current cell if its flow code equals the opposite direction.
-    Direction table (ESRI codes): 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE.
-    Opposite of direction d is: E<->W, SE<->NW, S<->N, SW<->NE.
     """
     nrows, ncols = flowdir.shape
 
-    # 8 neighbours and the ESRI code that means "this neighbour flows HERE"
-    # (i.e. the code in the neighbour cell that points back to the current cell)
-    # Neighbour at (dr, dc) points back to us with the *opposite* code.
-    # Opposites: 1<->16, 2<->32, 4<->64, 8<->128
-    NR   = np.array([ 0,  1,  1,  1,  0, -1, -1, -1], dtype=np.int64)
-    NC   = np.array([ 1,  1,  0, -1, -1, -1,  0,  1], dtype=np.int64)
-    # Code that neighbour at offset NR[i], NC[i] must have to drain to (r,c)
-    BACK = np.array([16, 32, 64, 128, 1, 2, 4, 8], dtype=np.uint8)
+    visited = np.zeros((nrows, ncols), dtype=np.bool_)
+    mask    = np.zeros((nrows, ncols), dtype=np.bool_)
+    queue_r = np.empty(nrows * ncols, dtype=np.int32)
+    queue_c = np.empty(nrows * ncols, dtype=np.int32)
+    head = np.int32(0)
+    tail = np.int32(0)
 
-    mask = np.zeros((nrows, ncols), dtype=np.bool_)
-    queue = np.empty(nrows * ncols, dtype=np.int64)
-    head = np.int64(0)
-    tail = np.int64(0)
-
-    mask[pour_row, pour_col] = True
-    queue[tail] = np.int64(pour_row) * ncols + pour_col
+    visited[pour_row, pour_col] = True
+    mask[pour_row, pour_col]    = True
+    queue_r[tail] = pour_row
+    queue_c[tail] = pour_col
     tail += 1
 
     while head < tail:
-        flat = queue[head]
+        r = queue_r[head]
+        c = queue_c[head]
         head += 1
-        r = flat // ncols
-        c = flat % ncols
         for k in range(8):
-            nr = r + NR[k]
-            nc = c + NC[k]
-            if 0 <= nr < nrows and 0 <= nc < ncols:
-                if not mask[nr, nc] and flowdir[nr, nc] == BACK[k]:
-                    mask[nr, nc] = True
-                    queue[tail] = np.int64(nr) * ncols + nc
-                    tail += 1
+            nr = r + drs[k]
+            nc = c + dcs[k]
+            if nr < 0 or nr >= nrows or nc < 0 or nc >= ncols:
+                continue
+            if visited[nr, nc]:
+                continue
+            if flowdir[nr, nc] == back[k]:
+                visited[nr, nc] = True
+                mask[nr, nc]    = True
+                queue_r[tail]   = nr
+                queue_c[tail]   = nc
+                tail += 1
 
     return mask
 
@@ -99,7 +118,11 @@ def delineate_watershed(
         ``True`` for cells that drain through the pour point.
     """
     check_type(flowdir, GridType.FlowDir)
-    mask = _bfs(flowdir.array, int(pour_row), int(pour_col))
+    mask = _bfs(
+        flowdir.array,
+        np.int32(pour_row), np.int32(pour_col),
+        _BFS_DR, _BFS_DC, _BFS_BACK,
+    )
     return Grid.create(
         array=mask,
         type=GridType.Mask,
@@ -170,4 +193,4 @@ def mask_area(mask: Grid) -> float:
 def _warmup(dtype: np.dtype | None = None) -> None:  # noqa: ARG001
     """Pre-compile the BFS kernel.  Dtype-agnostic; *dtype* is ignored."""
     tiny = np.array([[4, 4], [0, 0]], dtype=np.uint8)
-    _bfs(tiny, 1, 0)
+    _bfs(tiny, np.int32(1), np.int32(0), _BFS_DR, _BFS_DC, _BFS_BACK)
