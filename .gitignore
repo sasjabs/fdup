@@ -5,6 +5,7 @@ dist/*
 _docs/
 _utils_and_evals_raw/*
 _docs/*
+_raw/*
 .vscode/*
 .cursor/*
 examples/api_demo.ipynb
