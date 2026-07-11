@@ -331,3 +331,36 @@ def test_cli_river_tree(rasters, tmp_path):
     assert g.shape == (N, N)
     seeds = np.load(str(o_seeds))["seeds"]
     assert seeds.dtype.names is not None
+
+
+# ---------------------------------------------------------------------------
+# mask-seeds
+# ---------------------------------------------------------------------------
+
+
+def test_cli_mask_seeds(rasters, tmp_path):
+    # First produce seeds via river-tree
+    o_tree  = tmp_path / "tree.tif"
+    o_seeds = tmp_path / "seeds_ms.npz"
+    _run([
+        "river-tree",
+        "--flowdir", rasters["fd_fine"],
+        "--flowacc", rasters["fa_fine"],
+        "--o-tree",  str(o_tree),
+        "--o-seeds", str(o_seeds),
+    ])
+
+    # Now mask-seeds using ws_fine as the mask (whole watershed → keeps all segments)
+    o_masked = tmp_path / "seeds_masked.npz"
+    _run([
+        "mask-seeds",
+        "--seeds",   str(o_seeds),
+        "--flowdir", rasters["fd_fine"],
+        "--flowacc", rasters["fa_fine"],
+        "--mask",    rasters["ws_fine"],
+        "-o",        str(o_masked),
+    ])
+    assert o_masked.exists()
+    masked = np.load(str(o_masked))["seeds"]
+    assert masked.dtype.names is not None
+    assert len(masked) >= 1

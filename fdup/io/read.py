@@ -114,6 +114,13 @@ def read(
         array = array.astype(np.uint32)
         nodata = 0
 
+    elif grid_type == GridType.Strahler:
+        nodata_mask = (array == file_nodata) if file_nodata is not None else None
+        array = array.astype(np.uint8)
+        if nodata_mask is not None:
+            array[nodata_mask] = np.uint8(0)
+        nodata = 0
+
     else:
         raise ValueError(f"Unsupported grid_type: {grid_type!r}")
 

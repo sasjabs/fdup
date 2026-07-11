@@ -13,6 +13,8 @@ def warmup() -> None:
     from fdup.utils.pour import _warmup as _pour_warmup
     from fdup.utils.watershed import _warmup as _watershed_warmup
     from fdup.utils.tree import _warmup as _tree_warmup
+    from fdup.utils.strahler import _warmup as _strahler_warmup
+    from fdup.utils.vectorization import _warmup as _vectorization_warmup
     from fdup.evals.fdcomp import _warmup as _fdcomp_warmup
     from fdup.evals.huac import _warmup as _huac_warmup
     from fdup.evals.wscomp import _warmup as _wscomp_warmup
@@ -28,7 +30,9 @@ def warmup() -> None:
         _fdcomp_warmup(dtype)
         _huac_warmup(dtype)
 
-    _d8_warmup(None)        # DEM-dtype parametric; full matrix compiled internally
-    _watershed_warmup(None) # BFS kernel is dtype-agnostic
-    _wscomp_warmup(None)    # no numba kernel; no-op stub
-    _windrose_warmup(None)  # FlowDir is always uint8; kernel does not specialise
+    _d8_warmup(None)            # DEM-dtype parametric; full matrix compiled internally
+    _watershed_warmup(None)     # BFS kernel is dtype-agnostic
+    _strahler_warmup(None)      # FlowDir is always uint8; kernel does not specialise
+    _vectorization_warmup(None) # FlowDir is always uint8; kernels do not specialise
+    _wscomp_warmup(None)        # no numba kernel; no-op stub
+    _windrose_warmup(None)      # FlowDir is always uint8; kernel does not specialise

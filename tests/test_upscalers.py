@@ -168,6 +168,30 @@ class TestCOTAT:
     def test_cotat_plus_runs(self):
         fa = _make_flowacc()
         fd = _make_flowdir()
-        out = COTAT(fd, fa, k=2, mufp=1.0)
+        # mufp is now in metres; 5 000 m is ~4 pixel-lengths at 0.01° / 10°N
+        out = COTAT(fd, fa, k=2, mufp=5000.0)
+        assert out.shape == (4, 4)
+        assert out.array.dtype == np.uint8
+
+    def test_cotat_plus_mufp_zero_same_as_no_mufp(self):
+        """mufp=0 (always exceeded) should give the same result as plain COTAT."""
+        fa = _make_flowacc()
+        fd = _make_flowdir()
+        out_plain = COTAT(fd, fa, k=2)
+        out_mufp0 = COTAT(fd, fa, k=2, mufp=0.0)
+        np.testing.assert_array_equal(out_plain.array, out_mufp0.array)
+
+    def test_cotat_plus_mufp_projected_crs(self):
+        """COTAT+ with a projected (metre) CRS grid runs without error."""
+        from rasterio.crs import CRS
+        proj_crs = CRS.from_epsg(32632)  # UTM zone 32N, metres
+        # 100 m pixels
+        t = Affine(100.0, 0.0, 400000.0, 0.0, -100.0, 5000000.0)
+        arr = np.arange(64, dtype=np.uint32).reshape(8, 8) + 1
+        fa = Grid.create(array=arr, type=GridType.FlowAcc, transform=t, crs=proj_crs)
+        arr_fd = np.full((8, 8), 2, dtype=np.uint8)
+        fd = Grid.create(array=arr_fd, type=GridType.FlowDir, transform=t, crs=proj_crs)
+        # mufp = 200 m  ≈ 2 pixel-lengths at 100 m resolution
+        out = COTAT(fd, fa, k=2, mufp=200.0)
         assert out.shape == (4, 4)
         assert out.array.dtype == np.uint8

@@ -198,13 +198,13 @@ class TestGetCellAreas:
         assert np.all(np.diff(areas) > 0), "Areas should increase moving equatorward"
 
     def test_projected_constant(self):
-        # A projected transform with 100m pixels
+        # A projected transform with 100 m pixels (metre-based CRS).
         proj_transform = Affine(100.0, 0.0, 0.0, 0.0, -100.0, 0.0)
         areas = get_cell_areas(proj_transform, 10, geographic=False)
         assert areas.shape == (10,)
         assert np.all(areas == areas[0]), "Projected areas must be constant across rows"
-        # 100 × 100 m² = 0.01 km²
-        assert math.isclose(areas[0], 0.01, rel_tol=1e-9)
+        # 100 × 100 = 10 000 CRS units² (m² for a metre-based CRS; no /1e6 conversion)
+        assert math.isclose(areas[0], 10_000.0, rel_tol=1e-9)
 
     def test_geographic_vs_projected_differ_at_midlat(self):
         geo = get_cell_areas(GEO_TRANSFORM, 4, geographic=True)

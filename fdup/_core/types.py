@@ -26,6 +26,7 @@ class GridType(enum.Enum):
     FlowAcc = "FlowAcc"
     Mask = "Mask"
     Tree = "Tree"
+    Strahler = "Strahler"
 
 
 # ---------------------------------------------------------------------------
@@ -37,13 +38,15 @@ _FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.floa
 _FLOWDIR_DTYPES = (np.uint8,)
 _MASK_DTYPES = (np.bool_,)
 _TREE_DTYPES = (np.uint32,)
+_STRAHLER_DTYPES = (np.uint8,)
 
 _ALLOWED_DTYPES: dict[GridType, tuple[type, ...]] = {
-    GridType.DEM:     _DEM_DTYPES,
-    GridType.FlowDir: _FLOWDIR_DTYPES,
-    GridType.FlowAcc: _FLOWACC_DTYPES,
-    GridType.Mask:    _MASK_DTYPES,
-    GridType.Tree:    _TREE_DTYPES,
+    GridType.DEM:      _DEM_DTYPES,
+    GridType.FlowDir:  _FLOWDIR_DTYPES,
+    GridType.FlowAcc:  _FLOWACC_DTYPES,
+    GridType.Mask:     _MASK_DTYPES,
+    GridType.Tree:     _TREE_DTYPES,
+    GridType.Strahler: _STRAHLER_DTYPES,
 }
 
 
@@ -54,6 +57,8 @@ def _default_nodata(grid_type: GridType, dtype: np.dtype) -> Union[int, float, N
     if grid_type == GridType.Mask:
         return None
     if grid_type == GridType.Tree:
+        return 0
+    if grid_type == GridType.Strahler:
         return 0
     # DEM and FlowAcc
     if np.issubdtype(dtype, np.floating):
@@ -124,6 +129,9 @@ class Grid:
         elif type == GridType.Tree:
             array = array.astype(np.uint32)
 
+        elif type == GridType.Strahler:
+            array = array.astype(np.uint8)
+
         else:
             # DEM / FlowAcc: keep input dtype if it is in the allowed set
             allowed = _ALLOWED_DTYPES[type]
@@ -143,6 +151,10 @@ class Grid:
 
         # Tree always has nodata 0
         if type == GridType.Tree:
+            nodata = 0
+
+        # Strahler always has nodata 0
+        if type == GridType.Strahler:
             nodata = 0
 
         meta = GridMeta(type=type, transform=transform, crs=crs, nodata=nodata)

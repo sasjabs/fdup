@@ -5,6 +5,10 @@ Public API
 river_tree(flowdir, flowacc, mask=None) -> tuple[Grid, np.ndarray]
     Trace river segments as a tree raster plus a structured array of seeds.
 
+mask_seeds(seeds, flowdir, flowacc, mask) -> np.ndarray
+    Prune a seeds array to only in-mask sub-segments, re-computing acc and
+    length_m from the flowacc array and flow-direction grid.
+
 _warmup(dtype) -> None
     Pre-compile numba kernels for each FlowAcc dtype.
 """
@@ -342,12 +346,271 @@ def river_tree(
 
 
 # ---------------------------------------------------------------------------
+# mask_seeds kernel
+# ---------------------------------------------------------------------------
+
+
+@njit(cache=True)
+def _nb_mask_seeds(
+    seeds_geom,   # uint32 (nseed, 5): mouth_row, mouth_col, hw_row, hw_col, ncells
+    nseed,        # int64
+    acc_arr,      # 2-D numeric — full flowacc for acc lookup
+    dir_arr,      # uint8 2-D
+    mask_arr,     # bool 2-D
+    row_dists,    # float64 (nrows, 8) — COMPASS_ORDER step distances
+):
+    """Trace each seed headwater→mouth and emit in-mask sub-seeds.
+
+    For every seed, the kernel follows the D8 flowdir from headwater to mouth
+    and records contiguous runs of in-mask cells.  Each run with ≥ 2 cells
+    becomes one output sub-seed:
+
+    * ``mouth_*``     — most-downstream in-mask cell of the run.
+    * ``headwater_*`` — most-upstream in-mask cell of the run.
+    * ``ncells``      — number of cells in the run.
+    * acc             — ``acc_arr`` value at the run's mouth cell.
+    * length_m        — cumulative step distances (metres) within the run.
+
+    Single-cell runs are discarded.
+
+    Returns
+    -------
+    out_geom : uint32 (n_out, 5)
+    out_acc  : 1-D, same dtype as acc_arr
+    out_len  : float64 1-D
+    n_out    : int64
+    """
+    # D8 offsets (COMPASS_ORDER: E SE S SW W NW N NE)
+    dj = np.array([1, 1, 0, -1, -1, -1, 0, 1], dtype=np.int64)
+    di = np.array([0, 1, 1, 1, 0, -1, -1, -1], dtype=np.int64)
+
+    # D8 power-of-2 code → compass index (0..255 table)
+    idx = np.zeros(256, dtype=np.int64)
+    idx[1] = 0; idx[2] = 1; idx[4] = 2; idx[8] = 3    # noqa: E702
+    idx[16] = 4; idx[32] = 5; idx[64] = 6; idx[128] = 7
+
+    nrow = dir_arr.shape[0]
+    ncol = dir_arr.shape[1]
+
+    buf_cap = np.int64(max(np.int64(1024), nseed * np.int64(4)))
+    out_geom = np.empty((buf_cap, 5), dtype=np.uint32)
+    out_acc  = np.empty(buf_cap, dtype=acc_arr.dtype)
+    out_len  = np.empty(buf_cap, dtype=np.float64)
+    n_out    = np.int64(0)
+
+    for s in range(nseed):
+        hw_r      = np.int64(seeds_geom[s, 2])
+        hw_c      = np.int64(seeds_geom[s, 3])
+        m_r       = np.int64(seeds_geom[s, 0])
+        m_c       = np.int64(seeds_geom[s, 1])
+        max_steps = np.int64(seeds_geom[s, 4])
+
+        row = hw_r
+        col = hw_c
+
+        in_run     = False
+        run_ncells = np.int64(0)
+        run_len    = np.float64(0.0)
+        run_hw_r   = np.int64(0)
+        run_hw_c   = np.int64(0)
+        run_last_r = np.int64(0)
+        run_last_c = np.int64(0)
+        prev_dist  = np.float64(0.0)
+
+        for _ in range(max_steps):
+            in_mask = mask_arr[row, col]
+
+            if in_mask:
+                if not in_run:
+                    in_run     = True
+                    run_ncells = np.int64(1)
+                    run_len    = np.float64(0.0)
+                    run_hw_r   = row
+                    run_hw_c   = col
+                else:
+                    run_ncells += np.int64(1)
+                    run_len    += prev_dist
+                run_last_r = row
+                run_last_c = col
+            else:
+                if in_run and run_ncells >= np.int64(2):
+                    if n_out >= buf_cap:
+                        buf_cap  = buf_cap * np.int64(2)
+                        ng = np.empty((buf_cap, 5), dtype=np.uint32)
+                        ng[:n_out] = out_geom[:n_out]
+                        out_geom = ng
+                        na = np.empty(buf_cap, dtype=acc_arr.dtype)
+                        na[:n_out] = out_acc[:n_out]
+                        out_acc = na
+                        nl = np.empty(buf_cap, dtype=np.float64)
+                        nl[:n_out] = out_len[:n_out]
+                        out_len = nl
+                    out_geom[n_out, 0] = np.uint32(run_last_r)
+                    out_geom[n_out, 1] = np.uint32(run_last_c)
+                    out_geom[n_out, 2] = np.uint32(run_hw_r)
+                    out_geom[n_out, 3] = np.uint32(run_hw_c)
+                    out_geom[n_out, 4] = np.uint32(run_ncells)
+                    out_acc[n_out]     = acc_arr[run_last_r, run_last_c]
+                    out_len[n_out]     = run_len
+                    n_out += np.int64(1)
+                in_run     = False
+                run_ncells = np.int64(0)
+
+            if row == m_r and col == m_c:
+                break
+
+            dv = dir_arr[row, col]
+            if dv == np.uint8(0) or dv > np.uint8(128):
+                break
+            d_idx = idx[dv]
+            nr = row + di[d_idx]
+            nc = col + dj[d_idx]
+            if nr < np.int64(0) or nr >= nrow or nc < np.int64(0) or nc >= ncol:
+                break
+
+            prev_dist = row_dists[row, d_idx]
+            row = nr
+            col = nc
+
+        # Emit any remaining active run after the trace ends
+        if in_run and run_ncells >= np.int64(2):
+            if n_out >= buf_cap:
+                buf_cap  = buf_cap * np.int64(2)
+                ng = np.empty((buf_cap, 5), dtype=np.uint32)
+                ng[:n_out] = out_geom[:n_out]
+                out_geom = ng
+                na = np.empty(buf_cap, dtype=acc_arr.dtype)
+                na[:n_out] = out_acc[:n_out]
+                out_acc = na
+                nl = np.empty(buf_cap, dtype=np.float64)
+                nl[:n_out] = out_len[:n_out]
+                out_len = nl
+            out_geom[n_out, 0] = np.uint32(run_last_r)
+            out_geom[n_out, 1] = np.uint32(run_last_c)
+            out_geom[n_out, 2] = np.uint32(run_hw_r)
+            out_geom[n_out, 3] = np.uint32(run_hw_c)
+            out_geom[n_out, 4] = np.uint32(run_ncells)
+            out_acc[n_out]     = acc_arr[run_last_r, run_last_c]
+            out_len[n_out]     = run_len
+            n_out += np.int64(1)
+
+    return out_geom, out_acc, out_len, n_out
+
+
+# ---------------------------------------------------------------------------
+# mask_seeds public API
+# ---------------------------------------------------------------------------
+
+_REQUIRED_SEED_FIELDS = frozenset(
+    {"mouth_row", "mouth_col", "headwater_row", "headwater_col", "ncells"}
+)
+
+
+def mask_seeds(
+    seeds: np.ndarray,
+    flowdir: Grid,
+    flowacc: Grid,
+    mask: Grid,
+) -> np.ndarray:
+    """Prune a seeds array to only in-mask contiguous sub-segments.
+
+    Each seed (produced by :func:`river_tree`) is re-traced from headwater to
+    mouth using *flowdir*.  Contiguous runs of cells where *mask* is ``True``
+    are collected; each run with ≥ 2 cells becomes one output sub-seed.
+    ``acc`` is read from *flowacc* at the run's most-downstream cell;
+    ``length_m`` is computed via :func:`~fdup._core.geodesy.row_distance_table`.
+
+    Parameters
+    ----------
+    seeds :
+        Structured array as returned by :func:`river_tree`.  Must contain at
+        least the fields ``mouth_row``, ``mouth_col``, ``headwater_row``,
+        ``headwater_col``, and ``ncells``.
+    flowdir :
+        ``GridType.FlowDir``, uint8.
+    flowacc :
+        ``GridType.FlowAcc``; dtype must be one of the supported FlowAcc dtypes.
+    mask :
+        ``GridType.Mask`` (bool), same shape/transform/CRS as *flowdir*.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array with the same fields as :func:`river_tree` seeds:
+        ``(mouth_row, mouth_col, headwater_row, headwater_col, ncells,
+        acc, length_m)``.  ``acc`` dtype matches *flowacc*; ``length_m`` is
+        always float64 metres.  May be empty if no in-mask run of ≥ 2 cells
+        is found.
+    """
+    # ---- validation -------------------------------------------------------
+    check_type(flowdir, GridType.FlowDir)
+    check_type(flowacc, GridType.FlowAcc)
+    check_type(mask, GridType.Mask)
+    check_dtype(flowacc, _FLOWACC_DTYPES)
+    check_shape_match(flowdir, flowacc)
+    check_transform_match(flowdir, flowacc)
+    check_crs_match(flowdir, flowacc)
+    check_shape_match(flowdir, mask)
+    check_transform_match(flowdir, mask)
+    check_crs_match(flowdir, mask)
+
+    if seeds.dtype.names is None or not _REQUIRED_SEED_FIELDS.issubset(seeds.dtype.names):
+        missing = _REQUIRED_SEED_FIELDS - set(seeds.dtype.names or [])
+        raise ValueError(
+            f"seeds array is missing required fields: {sorted(missing)}"
+        )
+
+    seeds_dtype = _make_seeds_dtype(flowacc.array.dtype)
+
+    if len(seeds) == 0:
+        return np.empty(0, dtype=seeds_dtype)
+
+    # ---- build raw geometry array for the kernel --------------------------
+    nseed = np.int64(len(seeds))
+    seeds_geom = np.empty((int(nseed), 5), dtype=np.uint32)
+    seeds_geom[:, 0] = seeds["mouth_row"].astype(np.uint32)
+    seeds_geom[:, 1] = seeds["mouth_col"].astype(np.uint32)
+    seeds_geom[:, 2] = seeds["headwater_row"].astype(np.uint32)
+    seeds_geom[:, 3] = seeds["headwater_col"].astype(np.uint32)
+    seeds_geom[:, 4] = seeds["ncells"].astype(np.uint32)
+
+    # ---- per-row D8-neighbour distance table ------------------------------
+    row_dists = row_distance_table(
+        flowdir.meta.transform,
+        flowdir.shape[0],
+        geographic=flowdir.meta.is_geographic,
+    )
+
+    # ---- numba kernel -----------------------------------------------------
+    out_geom, out_acc, out_len, n_out = _nb_mask_seeds(
+        seeds_geom,
+        nseed,
+        flowacc.array,
+        flowdir.array,
+        mask.array,
+        row_dists,
+    )
+
+    n = int(n_out)
+    out = np.empty(n, dtype=seeds_dtype)
+    if n > 0:
+        out["mouth_row"]     = out_geom[:n, 0]
+        out["mouth_col"]     = out_geom[:n, 1]
+        out["headwater_row"] = out_geom[:n, 2]
+        out["headwater_col"] = out_geom[:n, 3]
+        out["ncells"]        = out_geom[:n, 4]
+        out["acc"]           = out_acc[:n]
+        out["length_m"]      = out_len[:n]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Warmup
 # ---------------------------------------------------------------------------
 
 
 def _warmup(dtype: np.dtype | None = None) -> None:  # noqa: ARG001
-    """Pre-compile ``_nb_trace`` for every supported FlowAcc dtype.
+    """Pre-compile ``_nb_trace`` and ``_nb_mask_seeds`` for every supported FlowAcc dtype.
 
     The *dtype* argument is accepted for registry uniformity but ignored;
     all FlowAcc dtypes are compiled unconditionally.
@@ -365,6 +628,12 @@ def _warmup(dtype: np.dtype | None = None) -> None:  # noqa: ARG001
     _ci = np.array([2, 1, 0], dtype=np.uint32)
     _cj = np.array([2, 1, 0], dtype=np.uint32)
     _nv = np.int64(3)
+
+    # Seed for mask_seeds warmup: one seed spanning (0,0)→(2,2), 3 cells
+    _seeds_geom = np.array([[2, 2, 0, 0, 3]], dtype=np.uint32)
+    _nseed = np.int64(1)
+    # All-True mask
+    _mask_arr = np.ones((4, 4), dtype=np.bool_)
 
     for _dt in _FLOWACC_DTYPES:
         if np.issubdtype(_dt, np.floating):
@@ -387,3 +656,4 @@ def _warmup(dtype: np.dtype | None = None) -> None:  # noqa: ARG001
             _nd = _dt(np.iinfo(_dt).max)
 
         _nb_trace(_acc, _nd, _dir, _row_dists, _ci, _cj, _nv)
+        _nb_mask_seeds(_seeds_geom, _nseed, _acc, _dir, _mask_arr, _row_dists)

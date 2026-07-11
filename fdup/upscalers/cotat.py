@@ -22,13 +22,12 @@ from fdup._core.d8 import (
     DECODE_DC, DECODE_DR, DECODE_VALID, ENCODE_DIR,
     DIR_DCOL, DIR_DROW,
 )
+from fdup._core.geodesy import row_distance_table
 from fdup._core.types import Grid, GridType
 from fdup._core.validation import (
     check_crs_match, check_dtype, check_shape_match,
     check_transform_match, check_type,
 )
-
-_SQRT2 = 1.4142135623730951
 
 
 # =========================================================================
@@ -92,12 +91,14 @@ def _largest_valid_in_cell(flowdir, flowacc, i, j, k,
 @njit(cache=True)
 def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
                                 orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                                row_dists,
                                 decode_dr, decode_dc, decode_valid,
                                 dir_drow, dir_dcol):
     """Length of the upstream flow path of pixel (sr, sc) confined to cell (i, j).
 
     At each junction the inflowing neighbour with the largest upstream area is
-    followed. Orthogonal steps have length 1, diagonal steps ``sqrt(2)``.
+    followed.  Step lengths are taken from *row_dists* (metres, COMPASS_ORDER),
+    so the returned path length is in **metres**.
     """
     r0 = i * k
     c0 = j * k
@@ -137,7 +138,7 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
                     best_fa = fa
                     best_nr = nr
                     best_nc = nc
-                    best_dist = _SQRT2 if (ddr != 0 and ddc != 0) else 1.0
+                    best_dist = row_dists[cur_r, d]
         if best_nr < 0:
             break
         total += best_dist
@@ -150,7 +151,7 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
 @njit(cache=True)
 def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
                            orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
-                           mufp, decode_dr, decode_dc, decode_valid,
+                           mufp, row_dists, decode_dr, decode_dc, decode_valid,
                            dir_drow, dir_dcol):
     """COTAT+ outlet pixel for cell (i, j) using the MUFP selection scheme."""
     r0 = i * k
@@ -250,6 +251,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
         path = _trace_upstream_within_cell(
             flowdir, flowacc, np.intp(bo_r[sel]), np.intp(bo_c[sel]), i, j, k,
             orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+            row_dists,
             decode_dr, decode_dc, decode_valid, dir_drow, dir_dcol)
         if path > mufp:
             return bo_r[sel], bo_c[sel]
@@ -262,7 +264,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
 @njit(cache=True, parallel=True)
 def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcols, k,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
-                        use_mufp, mufp, decode_dr, decode_dc, decode_valid,
+                        use_mufp, mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol):
     """Assign outlet pixels for all non-null cells (parallel over rows).
 
@@ -276,7 +278,7 @@ def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcol
                     r, c = _find_cell_outlet_mufp(
                         flowdir, flowacc, i, j, k,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
-                        mufp, decode_dr, decode_dc, decode_valid,
+                        mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol)
                 else:
                     r, c = _find_largest_in_cell(flowacc, i, j, k)
@@ -426,10 +428,11 @@ def _warmup(dtype=np.float64):
     null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     cells = np.full((mrows, mcols), 255, dtype=np.uint8)
+    row_dists = np.ones((n, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
                         mrows, mcols, k, n, n, flowdir_ndv, True,
-                        False, 0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
+                        False, 0.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
     _assign_all_directions(flowdir, flowacc, outlet_coords, cells,
                            null_cells, k, n, n, flowdir_ndv, True,
@@ -445,10 +448,11 @@ def _warmup(dtype=np.float64):
     flowacc = np.array([[1, 2], [1, 2]], dtype=dtype)
     null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
+    row_dists = np.ones((n, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
                         mrows, mcols, k, n, n, flowdir_ndv, True,
-                        True, 0.5, DECODE_DR, DECODE_DC, DECODE_VALID,
+                        True, 500.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
 
 
@@ -483,9 +487,9 @@ def COTAT(
         Minimum accumulated-area gain required at a downstream cell outlet
         for that cell to be selected as the receiving cell while tracing.
     mufp:
-        Minimum Upstream Flow Path (in fine-grid pixel side lengths) for the
-        COTAT+ outlet-selection scheme.  When ``None`` (default), the original
-        COTAT outlet selection (largest-upstream-area pixel) is used.
+        Minimum Upstream Flow Path in **metres** for the COTAT+ outlet-selection
+        scheme.  When ``None`` (default), the original COTAT outlet selection
+        (largest-upstream-area pixel) is used.
 
     Returns
     -------
@@ -550,11 +554,17 @@ def COTAT(
     use_mufp = mufp is not None
     mufp_val = float(mufp) if use_mufp else 0.0
 
+    row_dists = row_distance_table(
+        flowdir.meta.transform,
+        pad_rows,
+        geographic=flowdir.meta.is_geographic,
+    )
+
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     _assign_all_outlets(
         fd_buf, fa_buf, null_cells, outlet_coords,
         mrows, mcols, k, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
-        use_mufp, mufp_val, DECODE_DR, DECODE_DC, DECODE_VALID,
+        use_mufp, mufp_val, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
         DIR_DROW, DIR_DCOL,
     )
 

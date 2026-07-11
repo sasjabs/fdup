@@ -126,9 +126,10 @@ def flow_accumulation(flowdir: Grid, *, area: bool = True) -> Grid:
     flowdir :
         ``GridType.FlowDir``, uint8.
     area :
-        When ``True`` (default), each cell accumulates the geographic area
-        of its upstream cells in **km²**; output dtype is ``float32``,
-        nodata is ``NaN``.
+        When ``True`` (default), each cell accumulates the area of its
+        upstream cells; output dtype is ``float32``, nodata is ``NaN``.
+        The unit depends on the CRS: **km²** for a geographic CRS
+        (lat/lon), **CRS units²** (e.g. m²) for a projected CRS.
         When ``False``, each cell counts its upstream cells (including
         itself); output dtype is ``uint32`` if the maximum fits, else
         ``uint64``; nodata is ``iinfo(dtype).max``.

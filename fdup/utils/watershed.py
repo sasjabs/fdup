@@ -3,11 +3,10 @@
 Functions
 ---------
 delineate_watershed(flowdir, pour_row, pour_col) -> Grid
-disaggregate_mask(mask, k) -> Grid
-mask_area(mask) -> float
 _warmup(dtype) -> None
 
-Note: Implemented in Phase 3, Step 3.5.
+Note: disaggregate_mask and mask_area have moved to fdup.utils.masking.
+They remain importable from fdup.utils for backwards compatibility.
 """
 
 from __future__ import annotations
@@ -16,10 +15,8 @@ import numpy as np
 from numba import njit
 
 from fdup._core.d8 import DIR_DROW, DIR_DCOL, ENCODE_DIR
-from fdup._core.geodesy import get_cell_areas
 from fdup._core.types import Grid, GridType
 from fdup._core.validation import check_type
-from affine import Affine
 
 
 # ---------------------------------------------------------------------------
@@ -129,61 +126,6 @@ def delineate_watershed(
         transform=flowdir.meta.transform,
         crs=flowdir.meta.crs,
     )
-
-
-def disaggregate_mask(mask: Grid, k: int) -> Grid:
-    """Disaggregate a Mask Grid by factor *k* (pure numpy, no numba).
-
-    Parameters
-    ----------
-    mask :
-        ``GridType.Mask``, bool.
-    k :
-        Positive integer scale factor.  Each cell becomes a k×k block of
-        cells with the same value.
-
-    Returns
-    -------
-    Grid
-        ``GridType.Mask``, bool, shape ``(nrows*k, ncols*k)``.  The output
-        transform has pixel spacing ``a/k`` and ``e/k``; the origin is
-        unchanged.
-    """
-    check_type(mask, GridType.Mask)
-    if not isinstance(k, int) or k <= 0:
-        raise ValueError(f"k must be a positive integer, got {k!r}.")
-
-    out = np.repeat(np.repeat(mask.array, k, axis=0), k, axis=1)
-    t = mask.meta.transform
-    out_transform = Affine(t.a / k, t.b, t.c, t.d, t.e / k, t.f)
-    return Grid.create(
-        array=out,
-        type=GridType.Mask,
-        transform=out_transform,
-        crs=mask.meta.crs,
-    )
-
-
-def mask_area(mask: Grid) -> float:
-    """Compute the geographic area of a True-valued mask in **km²**.
-
-    Parameters
-    ----------
-    mask :
-        ``GridType.Mask``, bool.
-
-    Returns
-    -------
-    float
-        Total area in km².
-    """
-    check_type(mask, GridType.Mask)
-    cell_areas = get_cell_areas(
-        mask.meta.transform,
-        mask.shape[0],
-        geographic=mask.meta.is_geographic,
-    )
-    return float(np.sum(mask.array * cell_areas[:, np.newaxis]))
 
 
 # ---------------------------------------------------------------------------

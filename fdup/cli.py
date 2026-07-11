@@ -176,6 +176,124 @@ def _run_river_tree(args):
     np.savez(args.o_seeds, seeds=seeds)
 
 
+def _run_strahler(args):
+    warmup()
+    fd = fdup_io.read(args.flowdir, grid_type=GridType.FlowDir)
+    strahler_grid = utils.strahler_order(fd)
+    fdup_io.write(strahler_grid, args.output, overwrite=True)
+
+
+def _run_mask_seeds(args):
+    warmup()
+    seeds_path = Path(args.seeds)
+    if seeds_path.suffix.lower() != ".npz":
+        raise ValueError(
+            "expected an .npz file with a 'seeds' array "
+            "(produced by fdup river-tree or numpy savez)"
+        )
+    loaded = np.load(seeds_path, allow_pickle=False)
+    if "seeds" not in loaded:
+        raise ValueError(
+            "expected an .npz file with a 'seeds' array "
+            "(produced by fdup river-tree or numpy savez)"
+        )
+    seeds = loaded["seeds"]
+
+    fd = fdup_io.read(args.flowdir, grid_type=GridType.FlowDir)
+    fa = fdup_io.read(args.flowacc, grid_type=GridType.FlowAcc)
+    mask = fdup_io.read(args.mask, grid_type=GridType.Mask)
+    out_seeds = utils.mask_seeds(seeds, fd, fa, mask)
+    np.savez(args.output, seeds=out_seeds)
+
+
+# ---------------------------------------------------------------------------
+# CLI type helpers
+# ---------------------------------------------------------------------------
+
+_CLI_GRID_TYPES: dict[str, GridType] = {
+    "flowdir":  GridType.FlowDir,
+    "flowacc":  GridType.FlowAcc,
+    "dem":      GridType.DEM,
+    "mask":     GridType.Mask,
+    "strahler": GridType.Strahler,
+    "tree":     GridType.Tree,
+}
+
+
+def _parse_grid_type(s: str) -> GridType:
+    key = s.lower()
+    if key not in _CLI_GRID_TYPES:
+        raise argparse.ArgumentTypeError(
+            f"Unknown grid type {s!r}. "
+            f"Choose from: {', '.join(_CLI_GRID_TYPES)}"
+        )
+    return _CLI_GRID_TYPES[key]
+
+
+def _run_threshold_mask(args):
+    warmup()
+    if args.flowacc is not None:
+        grid = fdup_io.read(args.flowacc, grid_type=GridType.FlowAcc)
+    else:
+        grid = fdup_io.read(args.strahler, grid_type=GridType.Strahler)
+    mask = utils.threshold_mask(grid, args.cutoff)
+    fdup_io.write(mask, args.output, overwrite=True)
+
+
+def _run_mask_grid(args):
+    warmup()
+    grid_type = _parse_grid_type(args.grid_type)
+    grid = fdup_io.read(args.grid, grid_type=grid_type)
+    mask = fdup_io.read(args.mask, grid_type=GridType.Mask)
+    result = utils.mask_grid(grid, mask)
+    fdup_io.write(result, args.output, overwrite=True)
+
+
+def _run_crop_grid(args):
+    warmup()
+    grid_type = _parse_grid_type(args.grid_type)
+    grid = fdup_io.read(args.grid, grid_type=grid_type)
+    result = utils.crop_grid(grid)
+    fdup_io.write(result, args.output, overwrite=True)
+
+
+def _run_vectorize_network(args):
+    warmup()
+    fd = fdup_io.read(args.flowdir, grid_type=GridType.FlowDir)
+    fa = fdup_io.read(args.flowacc, grid_type=GridType.FlowAcc) if args.flowacc else None
+    gdf = utils.vectorize_network(fd, flowacc=fa)
+    gdf.to_file(args.output, driver="GPKG")
+
+
+def _run_vectorize_tree(args):
+    warmup()
+    seeds_path = Path(args.seeds)
+    if seeds_path.suffix.lower() != ".npz":
+        raise ValueError(
+            "expected an .npz file with a 'seeds' array "
+            "(produced by fdup river-tree or numpy savez)"
+        )
+    loaded = np.load(seeds_path, allow_pickle=False)
+    if "seeds" not in loaded:
+        raise ValueError(
+            "expected an .npz file with a 'seeds' array "
+            "(produced by fdup river-tree or numpy savez)"
+        )
+    seeds = loaded["seeds"]
+
+    fd = fdup_io.read(args.flowdir, grid_type=GridType.FlowDir)
+    accuracy = np.load(args.accuracy) if args.accuracy else None
+
+    gdf = utils.vectorize_tree(
+        seeds,
+        fd,
+        cutoff=args.cutoff,
+        rank=args.rank,
+        accuracy=accuracy,
+    )
+    gdf.to_file(args.output, driver="GPKG")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -236,7 +354,7 @@ def main(argv=None):
         "--mufp",
         type=float,
         default=None,
-        help="Minimum Upstream Flow Path (fine-grid pixels) enabling COTAT+ "
+        help="Minimum Upstream Flow Path in metres enabling the COTAT+ "
              "outlet-selection scheme (default: disabled / plain COTAT)",
     )
     p_cotat.set_defaults(func=_run_cotat)
@@ -408,6 +526,140 @@ def main(argv=None):
         help="Output seeds .npz path (use with compare-flowdir --seeds)"
     )
     p_rt.set_defaults(func=_run_river_tree)
+
+    # ------------------------------------------------------------------
+    # strahler
+    # ------------------------------------------------------------------
+    p_strahler = subparsers.add_parser(
+        "strahler",
+        help="Compute Strahler stream orders from a D8 flow direction grid",
+    )
+    p_strahler.add_argument("--flowdir", required=True, help="Path to flow direction raster")
+    p_strahler.add_argument(
+        "-o", "--output", required=True, help="Output Strahler order raster path (uint8)"
+    )
+    p_strahler.set_defaults(func=_run_strahler)
+
+    # ------------------------------------------------------------------
+    # mask-seeds
+    # ------------------------------------------------------------------
+    p_ms = subparsers.add_parser(
+        "mask-seeds",
+        help="Prune a seeds .npz to in-mask sub-segments, re-computing acc and length_m",
+    )
+    p_ms.add_argument(
+        "--seeds", required=True,
+        help=".npz file with a 'seeds' structured array (from fdup river-tree or np.savez)"
+    )
+    p_ms.add_argument("--flowdir", required=True, help="Path to flow direction raster")
+    p_ms.add_argument("--flowacc", required=True, help="Path to flow accumulation raster")
+    p_ms.add_argument("--mask", required=True, help="Path to mask raster (GridType.Mask)")
+    p_ms.add_argument("-o", "--output", required=True, help="Output seeds .npz path")
+    p_ms.set_defaults(func=_run_mask_seeds)
+
+    # ------------------------------------------------------------------
+    # threshold-mask
+    # ------------------------------------------------------------------
+    p_tm = subparsers.add_parser(
+        "threshold-mask",
+        help="Create a boolean mask where grid values are >= cutoff",
+    )
+    _tm_group = p_tm.add_mutually_exclusive_group(required=True)
+    _tm_group.add_argument(
+        "--flowacc", default=None,
+        help="Path to a flow accumulation raster (GridType.FlowAcc)",
+    )
+    _tm_group.add_argument(
+        "--strahler", default=None,
+        help="Path to a Strahler order raster (GridType.Strahler)",
+    )
+    p_tm.add_argument(
+        "--cutoff", type=float, required=True,
+        help="Threshold value (inclusive); cells >= cutoff become True",
+    )
+    p_tm.add_argument("-o", "--output", required=True, help="Output mask raster path")
+    p_tm.set_defaults(func=_run_threshold_mask)
+
+    # ------------------------------------------------------------------
+    # mask-grid
+    # ------------------------------------------------------------------
+    p_mg = subparsers.add_parser(
+        "mask-grid",
+        help="Apply a boolean mask to a grid, setting nodata where mask is False",
+    )
+    p_mg.add_argument("--grid", required=True, help="Path to the input raster")
+    p_mg.add_argument(
+        "--grid-type", required=True, dest="grid_type",
+        metavar="TYPE",
+        help=(
+            "Semantic type of --grid. "
+            f"Choices: {', '.join(_CLI_GRID_TYPES)}"
+        ),
+    )
+    p_mg.add_argument("--mask", required=True, help="Path to the mask raster (GridType.Mask)")
+    p_mg.add_argument("-o", "--output", required=True, help="Output raster path")
+    p_mg.set_defaults(func=_run_mask_grid)
+
+    # ------------------------------------------------------------------
+    # crop-grid
+    # ------------------------------------------------------------------
+    p_cg = subparsers.add_parser(
+        "crop-grid",
+        help="Trim a grid to the minimal bounding box of data (non-nodata) cells",
+    )
+    p_cg.add_argument("--grid", required=True, help="Path to the input raster")
+    p_cg.add_argument(
+        "--grid-type", required=True, dest="grid_type",
+        metavar="TYPE",
+        help=(
+            "Semantic type of --grid. "
+            f"Choices: {', '.join(_CLI_GRID_TYPES)}"
+        ),
+    )
+    p_cg.add_argument("-o", "--output", required=True, help="Output raster path")
+    p_cg.set_defaults(func=_run_crop_grid)
+
+    # ------------------------------------------------------------------
+    # vectorize-network
+    # ------------------------------------------------------------------
+    p_vn = subparsers.add_parser(
+        "vectorize-network",
+        help="Vectorize a D8 network into LineString segments (GeoPackage output)",
+    )
+    p_vn.add_argument("--flowdir", required=True, help="Path to flow direction raster")
+    p_vn.add_argument(
+        "--flowacc", default=None,
+        help="Optional flow accumulation raster; attached as 'flowacc' attribute",
+    )
+    p_vn.add_argument("-o", "--output", required=True, help="Output GeoPackage path (.gpkg)")
+    p_vn.set_defaults(func=_run_vectorize_network)
+
+    # ------------------------------------------------------------------
+    # vectorize-tree
+    # ------------------------------------------------------------------
+    p_vt = subparsers.add_parser(
+        "vectorize-tree",
+        help="Convert a seeds .npz to a LineString GeoDataFrame (GeoPackage output)",
+    )
+    p_vt.add_argument(
+        "--seeds", required=True,
+        help=".npz file with a 'seeds' structured array (from fdup river-tree)",
+    )
+    p_vt.add_argument("--flowdir", required=True, help="Path to flow direction raster")
+    p_vt.add_argument(
+        "--cutoff", type=float, default=None,
+        help="Keep only seeds with acc >= cutoff (mutually exclusive with --rank)",
+    )
+    p_vt.add_argument(
+        "--rank", type=int, default=None,
+        help="Keep the top-N seeds by acc (mutually exclusive with --cutoff)",
+    )
+    p_vt.add_argument(
+        "--accuracy", default=None,
+        help="Optional .npy file of per-seed accuracy values (same length as seeds)",
+    )
+    p_vt.add_argument("-o", "--output", required=True, help="Output GeoPackage path (.gpkg)")
+    p_vt.set_defaults(func=_run_vectorize_tree)
 
     # ------------------------------------------------------------------
     # Dispatch

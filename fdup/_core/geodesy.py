@@ -1,9 +1,16 @@
 """Geodesy helpers: cell areas, great-circle and Euclidean distances.
 
-All distance functions return metres; ``get_cell_areas`` returns km².
+All distance functions return metres.  ``get_cell_areas`` returns:
+
+* **km²** for geographic CRS (``geographic=True``), where cell area varies
+  by latitude using the spherical-trapezoid formula.
+* **CRS units²** for projected CRS (``geographic=False``), i.e.
+  ``abs(transform.a * transform.e)`` without any unit conversion.  For a
+  metre-based CRS this is m²; for a foot-based CRS this is ft²; callers are
+  responsible for interpreting the unit correctly.
+
 The ``geographic`` flag controls whether calculations account for latitude
-distortion (True) or assume a flat projected CRS where pixel spacing is
-already in metres (False).
+distortion (True) or assume a flat projected CRS (False).
 """
 
 from __future__ import annotations
@@ -90,7 +97,7 @@ def get_cell_areas(
     *,
     geographic: bool,
 ) -> np.ndarray:
-    """Cell area in **km²** for each row of a raster.
+    """Per-row cell area for a raster.
 
     Parameters
     ----------
@@ -100,13 +107,15 @@ def get_cell_areas(
         Number of rows in the raster.
     geographic :
         ``True`` for geographic CRS (lat/lon degrees); cell area then varies
-        by latitude.  ``False`` for projected CRS; pixel spacing is assumed to
-        be in metres and the area is constant across rows.
+        by latitude and is returned in **km²**.
+        ``False`` for projected CRS; the area is constant across rows and is
+        returned in **CRS units²** (e.g. m² for a metre-based CRS).
 
     Returns
     -------
     np.ndarray, shape (nrows,), dtype float64
-        Per-row cell area in km².
+        Per-row cell area.  Unit is **km²** when ``geographic=True`` and
+        **CRS units²** when ``geographic=False``.
     """
     if geographic:
         # Spherical trapezoid area (m²) per row, then convert to km².
@@ -117,11 +126,10 @@ def get_cell_areas(
         dx_m = dx_deg * (math.pi / 180.0) * _EARTH_RADIUS_M * np.cos(np.deg2rad(lat_centers))
         return (dx_m * dy_m) / 1e6
     else:
-        # Projected: constant cell area (assumed metres → km²).
-        # NOTE: this assumes the transform units are metres; callers are
-        # responsible for providing a suitably projected CRS.
-        area_m2 = abs(transform.a * transform.e)
-        return np.full(nrows, area_m2 / 1e6, dtype=np.float64)
+        # Projected: constant cell area in CRS units² (no unit conversion).
+        # Callers are responsible for interpreting the unit based on their CRS.
+        area_crs2 = abs(transform.a * transform.e)
+        return np.full(nrows, area_crs2, dtype=np.float64)
 
 
 def row_distance_table(
