@@ -11,7 +11,9 @@ vectorize_network(flowdir, flowacc=None) -> geopandas.GeoDataFrame
 vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)
     -> geopandas.GeoDataFrame
     Trace each seed (from :func:`~fdup.utils.tree.river_tree`) from headwater
-    to mouth and return one LineString per seed, with optional ``flowacc`` and
+    to mouth and return one LineString per seed.  When the mouth cell has a
+    valid downstream step, that neighbour is appended so tributaries connect
+    to the trunk at shared junction cell centres.  Optional ``flowacc`` and
     ``accur`` columns.
 
 _warmup(dtype=None) -> None
@@ -231,6 +233,9 @@ def _nb_trace_seed_paths(
 
     Follows D8 ``dir_arr`` starting from headwater until the mouth cell is
     reached or the trace cannot continue (out of bounds, sink, nodata).
+    After the mouth cell is appended, one additional downstream cell is
+    included when the mouth has a valid in-bounds flow direction, so
+    tributary LineStrings meet the trunk at shared junction coordinates.
 
     Parameters
     ----------
@@ -285,6 +290,24 @@ def _nb_trace_seed_paths(
             coord_ptr += np.int64(1)
 
             if row == m_r and col == m_c:
+                # Extend one cell downstream from the mouth so tributaries
+                # connect to the trunk at shared junction cell centres.
+                md = np.int64(dir_arr[int(row), int(col)])
+                if md > np.int64(0) and md <= np.int64(128):
+                    mk  = idx[md]
+                    mnr = row + di[mk]
+                    mnc = col + dj[mk]
+                    if np.int64(0) <= mnr < nrow and np.int64(0) <= mnc < ncol:
+                        mnd = np.int64(dir_arr[int(mnr), int(mnc)])
+                        if mnd <= np.int64(128):
+                            if coord_ptr >= max_coords:
+                                max_coords *= np.int64(2)
+                                new_c = np.empty((int(max_coords), 2), dtype=np.int32)
+                                new_c[:coord_ptr] = all_coords[:coord_ptr]
+                                all_coords = new_c
+                            all_coords[coord_ptr, 0] = np.int32(mnr)
+                            all_coords[coord_ptr, 1] = np.int32(mnc)
+                            coord_ptr += np.int64(1)
                 break
 
             d = np.int64(dir_arr[int(row), int(col)])
@@ -395,9 +418,11 @@ def vectorize_tree(
     """Convert a seeds array to a GeoDataFrame of river-segment LineStrings.
 
     Each seed (as produced by :func:`~fdup.utils.tree.river_tree`) is
-    traced from headwater to mouth by following *flowdir* downstream.  The
-    result is one row per seed, with a ``flowacc`` column taken from
-    ``seeds["acc"]`` and an optional ``accur`` column from *accuracy*.
+    traced from headwater to mouth by following *flowdir* downstream.  When
+    the mouth cell has a valid downstream neighbour, that cell is appended
+    so tributaries share junction coordinates with the trunk.  The result is
+    one row per seed, with a ``flowacc`` column taken from ``seeds["acc"]``
+    and an optional ``accur`` column from *accuracy*.
 
     Parameters
     ----------

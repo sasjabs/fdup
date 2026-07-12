@@ -30,6 +30,8 @@ Requirements: Python `>=3.10`, `numpy`, `numba`, `rasterio`, `pandas`, `affine`,
 
 ---
 
+
+
 ## Quickstart
 
 ```python
@@ -47,7 +49,11 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 
 ---
 
+
+
 ## Submodule reference
+
+
 
 ### `fdup.io`
 
@@ -56,6 +62,8 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 | ------------------------------------------- | ------------------------------------------------------------------------------- |
 | `read(path, grid_type)`                     | Read a GeoTIFF into a `Grid`. Validates dtype against the requested `GridType`. |
 | `write(grid, path, *, overwrite, compress)` | Write a `Grid` to a GeoTIFF.                                                    |
+
+
 
 
 ### `fdup.upscalers`
@@ -68,26 +76,30 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 | `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. Returns `GridType.FlowDir`.                           |
 
 
+
+
 ### `fdup.utils`
 
 
-| Function                                                                         | Description                                                                                                       |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `d8(dem, spherical=True)`                                                        | Compute ESRI D8 flow directions from a DEM.                                                                       |
-| `flow_accumulation(flowdir, *, area=True)`                                       | Compute upstream flow accumulation (area in km² for geographic CRS, CRS units² for projected CRS, or raw cell count). |
-| `strahler_order(flowdir)`                                                        | Compute Strahler stream orders via BFS. Returns `GridType.Strahler` (uint8; 0 = nodata/sink).                    |
-| `snap_pour_cell(flowacc, x, y, radius)`                                          | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`.                    |
-| `delineate_watershed(flowdir, pour_row, pour_col)`                               | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                                               |
-| `disaggregate_mask(mask, k)`                                                     | Expand a coarse mask by factor `k` (nearest-neighbour).                                                           |
-| `match_grids(reference, other)`                                                  | Crop/pad `other` to the same extent as `reference`.                                                               |
-| `mask_area(mask)`                                                                | Total area of True-valued cells: km² for geographic CRS, CRS units² for projected CRS.                            |
-| `threshold_mask(grid, cutoff)`                                                   | Boolean mask where `value >= cutoff`; nodata/NaN cells → False. Accepts `FlowAcc` or `Strahler`.                 |
-| `mask_grid(grid, mask)`                                                          | Set nodata on `grid` wherever `mask` is False. Returns a new Grid of the same type.                               |
-| `crop_grid(grid)`                                                                | Trim `grid` to the minimal bounding box of data cells; raises `ValueError` for all-nodata grids.                 |
-| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)`                       | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates.                            |
-| `mask_seeds(seeds, flowdir, flowacc, mask)`                                      | Prune a seeds array to mask-intersecting sub-segments; returns a new structured array with recomputed lengths.    |
-| `vectorize_network(flowdir, flowacc=None)`                                       | Decompose D8 grid into river-segment LineStrings (GeoDataFrame). Requires `geopandas` and `shapely`.             |
-| `vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)`       | Trace each seed from headwater to mouth and return one LineString per seed (GeoDataFrame).                        |
+| Function                                                                   | Description                                                                                                           |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `d8(dem, spherical=True)`                                                  | Compute ESRI D8 flow directions from a DEM.                                                                           |
+| `flow_accumulation(flowdir, *, area=True)`                                 | Compute upstream flow accumulation (area in km² for geographic CRS, CRS units² for projected CRS, or raw cell count). |
+| `strahler_order(flowdir)`                                                  | Compute Strahler stream orders via BFS. Returns `GridType.Strahler` (uint8; 0 = nodata/sink).                         |
+| `snap_pour_cell(flowacc, x, y, radius)`                                    | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`.                        |
+| `delineate_watershed(flowdir, pour_row, pour_col)`                         | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                                                   |
+| `disaggregate_mask(mask, k)`                                               | Expand a coarse mask by factor `k` (nearest-neighbour).                                                               |
+| `match_grids(reference, other)`                                            | Crop/pad `other` to the same extent as `reference`.                                                                   |
+| `mask_area(mask)`                                                          | Total area of True-valued cells: km² for geographic CRS, CRS units² for projected CRS.                                |
+| `threshold_mask(grid, cutoff)`                                             | Boolean mask where `value >= cutoff`; nodata/NaN cells → False. Accepts `FlowAcc` or `Strahler`.                      |
+| `mask_grid(grid, mask)`                                                    | Set nodata on `grid` wherever `mask` is False. Returns a new Grid of the same type.                                   |
+| `crop_grid(grid)`                                                          | Trim `grid` to the minimal bounding box of data cells; raises `ValueError` for all-nodata grids.                      |
+| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)`                 | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates.                                |
+| `mask_seeds(seeds, flowdir, flowacc, mask)`                                | Prune a seeds array to mask-intersecting sub-segments; returns a new structured array with recomputed lengths.        |
+| `vectorize_network(flowdir, flowacc=None)`                                 | Decompose D8 grid into river-segment LineStrings (GeoDataFrame). Requires `geopandas` and `shapely`.                  |
+| `vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)` | Trace each seed from headwater to mouth and return one LineString per seed (GeoDataFrame).                            |
+
+
 
 
 ### `fdup.evals`
@@ -100,6 +112,8 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 | `huac(flowacc_fine, flowdir_coarse, flowacc_coarse, x, y, radius, *, upstream_area_threshold)`      | Hiearchical upstream-area comparison: returns an error raster and a DataFrame. |
 | `flowdir_windrose(flowdir, mask)`                                                                   | Direction-frequency windrose for a flow direction grid.                        |
 | `windrose_emd(wr1, wr2)`                                                                            | Earth Mover's Distance between two windroses.                                  |
+
+
 
 
 ### Top-level names
@@ -115,6 +129,8 @@ fdup.GridType            # GridType enum (DEM, FlowDir, FlowAcc, Mask, Tree, Str
 
 ---
 
+
+
 ## CLI reference
 
 After installation the `fdup` command is available on the PATH.
@@ -122,6 +138,8 @@ After installation the `fdup` command is available on the PATH.
 ```bash
 fdup --help
 ```
+
+
 
 ### Upscaling
 
@@ -141,6 +159,8 @@ fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o flowdir_coarse.tif -k 
      --area-threshold 10 --mufp 5000
 ```
 
+
+
 ### Derivation utilities
 
 ```bash
@@ -159,6 +179,8 @@ fdup watershed --flowdir flowdir.tif --x -80.05 --y 35.05 --radius 5000 \
      -o watershed.tif --flowacc flowacc.tif
 ```
 
+
+
 ### Masking
 
 ```bash
@@ -172,6 +194,8 @@ fdup mask-grid --grid flowacc.tif --mask streams.tif -o flowacc_masked.tif
 # Trim grid to the minimal bounding box of data cells
 fdup crop-grid --grid flowacc.tif -o flowacc_cropped.tif
 ```
+
+
 
 ### River tree and vectorization
 
@@ -194,6 +218,8 @@ fdup vectorize-tree --flowdir flowdir.tif --seeds seeds.npz --cutoff 1000 -o tre
 fdup vectorize-tree --flowdir flowdir.tif --seeds seeds.npz --rank 10 -o tree.gpkg
 ```
 
+
+
 ### Evaluation
 
 ```bash
@@ -213,7 +239,11 @@ fdup huac --flowacc-fine fa_fine.tif --flowdir-coarse fd_coarse.tif \
 
 ---
 
+
+
 ## Caveats
+
+
 
 ### `snap_pour_cell`: radius is in CRS units
 
@@ -227,12 +257,14 @@ To use metric radii, reproject the grid to a projected CRS first.
 `mask_area` and `flow_accumulation(..., area=True)` return areas in different
 units depending on the CRS:
 
-* **Geographic CRS** (lat/lon, e.g. EPSG:4326): areas are in **km²**, computed
-  via the spherical-trapezoid formula, so cell area varies by latitude.
-* **Projected CRS** (e.g. UTM): areas are in **CRS units²**.  For a
-  metre-based CRS this is **m²**; for a foot-based CRS this is **ft²**.
-  Callers are responsible for interpreting the unit based on their CRS.
-  Reproject to a metre-based CRS (e.g. a UTM zone) if m² output is required.
+- **Geographic CRS** (lat/lon, e.g. EPSG:4326): areas are in **km²**, computed
+via the spherical-trapezoid formula, so cell area varies by latitude.
+- **Projected CRS** (e.g. UTM): areas are in **CRS units²**.  For a
+metre-based CRS this is **m²**; for a foot-based CRS this is **ft²**.
+Callers are responsible for interpreting the unit based on their CRS.
+Reproject to a metre-based CRS (e.g. a UTM zone) if m² output is required.
+
+
 
 ### COTAT+ MUFP is in metres
 
@@ -251,6 +283,8 @@ affected.  Use `uint64` accumulation (cell counts only) if exact integer results
 are required.
 
 ---
+
+
 
 ## Migration guide from v0.1
 
@@ -278,6 +312,8 @@ fdup.io.write(fd, "flowdir_coarse.tif", overwrite=True)
 The same pattern applies to `NSA` and `COTAT`.
 
 ---
+
+
 
 ## Input data conventions
 

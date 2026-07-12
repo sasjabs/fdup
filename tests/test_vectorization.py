@@ -217,9 +217,11 @@ class TestVectorizeTree:
     def test_seed_ncells_matches_linestring_length(self, seeds, fd):
         gdf = vectorize_tree(seeds, fd)
         for row, seed in zip(gdf.itertuples(), seeds):
-            assert len(row.geometry.coords) == int(seed["ncells"]), (
-                f"seed ncells={seed['ncells']} but geometry has "
-                f"{len(row.geometry.coords)} points"
+            n = int(seed["ncells"])
+            n_pts = len(row.geometry.coords)
+            # ncells cells plus optional one-cell downstream connector at mouth
+            assert n_pts == n or n_pts == n + 1, (
+                f"seed ncells={n} but geometry has {n_pts} points"
             )
 
     def test_headwater_is_first_coord(self, seeds, fd):
@@ -235,8 +237,9 @@ class TestVectorizeTree:
             assert abs(x0 - expected_x) < 1e-9
             assert abs(y0 - expected_y) < 1e-9
 
-    def test_mouth_is_last_coord(self, seeds, fd):
-        """The LineString should end at the mouth cell centre."""
+    def test_mouth_is_last_or_penultimate_coord(self, seeds, fd):
+        """The LineString includes the mouth cell centre; it may be followed by
+        one downstream connector cell when the mouth has valid flow direction."""
         gdf = vectorize_tree(seeds, fd)
         t   = TRANSFORM
         for geom, seed in zip(gdf.geometry, seeds):
@@ -244,9 +247,24 @@ class TestVectorizeTree:
             m_c = int(seed["mouth_col"])
             expected_x = t.c + (m_c + 0.5) * t.a
             expected_y = t.f + (m_r + 0.5) * t.e
-            xn, yn = geom.coords[-1]
-            assert abs(xn - expected_x) < 1e-9
-            assert abs(yn - expected_y) < 1e-9
+            mouth_xy = (expected_x, expected_y)
+            coords = list(geom.coords)
+            if len(coords) == int(seed["ncells"]) + 1:
+                xn, yn = coords[-2]
+            else:
+                xn, yn = coords[-1]
+            assert abs(xn - mouth_xy[0]) < 1e-9
+            assert abs(yn - mouth_xy[1]) < 1e-9
+
+    def test_tributary_connects_at_junction(self, seeds, fd):
+        """The low-acc tributary should extend to the shared junction at J(2,2)."""
+        gdf = vectorize_tree(seeds, fd)
+        junction_xy = (2.5, 2.5)
+        tributary = min(gdf.itertuples(), key=lambda r: r.flowacc)
+        assert any(
+            abs(x - junction_xy[0]) < 1e-9 and abs(y - junction_xy[1]) < 1e-9
+            for x, y in tributary.geometry.coords
+        ), "tributary should reach junction (2.5, 2.5)"
 
     def test_cutoff_filters_seeds(self, seeds, fd):
         """cutoff=3 keeps only seeds with acc >= 3 (only the main trunk, acc=7)."""
