@@ -12,7 +12,11 @@ from fdup.utils.watershed import delineate_watershed
 from fdup.utils.match_grids import match_grids
 from fdup.utils.strahler import strahler_order
 from fdup.utils.tree import mask_seeds, river_tree
-from fdup.utils.vectorization import vectorize_network, vectorize_tree
+from fdup.utils.vectorization import (
+    vectorize_network,
+    vectorize_tree,
+    vectorize_watershed,
+)
 
 __all__ = [
     "d8",
@@ -30,4 +34,5 @@ __all__ = [
     "mask_seeds",
     "vectorize_network",
     "vectorize_tree",
+    "vectorize_watershed",
 ]

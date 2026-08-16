@@ -16,12 +16,19 @@ vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)
     to the trunk at shared junction cell centres.  Optional ``flowacc`` and
     ``accur`` columns.
 
+vectorize_watershed(mask) -> shapely.geometry.MultiPolygon
+    Convert a boolean Mask grid to a MultiPolygon covering True cells
+    exactly (cell corners, GDAL polygonize).  Empty mask → empty
+    MultiPolygon.
+
 _warmup(dtype=None) -> None
     Pre-compile all Numba kernels (dtype-agnostic).
 
 Notes
 -----
-Both functions require ``geopandas >= 0.14`` and ``shapely >= 2.0``.
+``vectorize_network`` and ``vectorize_tree`` require ``geopandas >= 0.14``
+and ``shapely >= 2.0``.  ``vectorize_watershed`` requires ``rasterio`` and
+``shapely`` (already package dependencies).
 """
 
 from __future__ import annotations
@@ -537,6 +544,52 @@ def vectorize_tree(
         data["accur"] = [float(accuracy[int(i)]) for i in sel_idx]
 
     return gpd.GeoDataFrame(data, crs=crs)
+
+
+def vectorize_watershed(
+    mask: Grid,
+) -> "MultiPolygon":  # type: ignore[name-defined]  # noqa: F821
+    """Convert a boolean Mask grid to a MultiPolygon of True cells.
+
+    Polygon vertices are cell corners (``mask.meta.transform``), so the
+    result covers True pixels exactly — unlike :func:`vectorize_network`
+    and :func:`vectorize_tree`, which use cell centres for LineStrings.
+    Connected components and holes are produced by GDAL polygonize
+    (4-connectivity: polygons share an edge, not only a corner).  Pixel
+    stairsteps are not simplified.
+
+    Shapely geometries do not carry CRS; callers that need one can wrap
+    the result, e.g.
+    ``GeoDataFrame({"geometry": [mp]}, crs=mask.meta.crs)``.
+
+    Parameters
+    ----------
+    mask :
+        ``GridType.Mask``, bool.
+
+    Returns
+    -------
+    shapely.geometry.MultiPolygon
+        In the mask's world coordinates.  Empty when the mask has no True
+        cells.  Area equals ``n_true_cells * |a * e|`` for an axis-aligned
+        transform.
+    """
+    from rasterio.features import shapes
+    from shapely.geometry import MultiPolygon, Polygon, shape
+
+    check_type(mask, GridType.Mask)
+
+    src = np.asarray(mask.array, dtype=np.uint8)
+    parts = []
+    for geom, value in shapes(src, mask=mask.array, transform=mask.meta.transform):
+        if value != 1:
+            continue
+        g = shape(geom)
+        if isinstance(g, Polygon) and not g.is_empty:
+            parts.append(g)
+        elif isinstance(g, MultiPolygon):
+            parts.extend(p for p in g.geoms if not p.is_empty)
+    return MultiPolygon(parts)
 
 
 # ---------------------------------------------------------------------------

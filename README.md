@@ -98,6 +98,7 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 | `mask_seeds(seeds, flowdir, flowacc, mask)`                                | Prune a seeds array to mask-intersecting sub-segments; returns a new structured array with recomputed lengths.        |
 | `vectorize_network(flowdir, flowacc=None)`                                 | Decompose D8 grid into river-segment LineStrings (GeoDataFrame). Requires `geopandas` and `shapely`.                  |
 | `vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)` | Trace each seed from headwater to mouth and return one LineString per seed (GeoDataFrame).                            |
+| `vectorize_watershed(mask)`                                                | Convert a boolean Mask grid to a MultiPolygon covering True cells exactly (cell corners).                             |
 
 
 

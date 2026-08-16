@@ -1,4 +1,4 @@
-"""Tests for fdup.utils.vectorization: vectorize_network and vectorize_tree.
+"""Tests for fdup.utils.vectorization: vectorize_network, vectorize_tree, vectorize_watershed.
 
 Synthetic network (5×5 grid):
 
@@ -37,12 +37,16 @@ pytest.importorskip("geopandas")
 pytest.importorskip("shapely")
 
 import geopandas as gpd  # noqa: E402  (after importorskip guard)
-from shapely.geometry import LineString  # noqa: E402
+from shapely.geometry import LineString, MultiPolygon, Polygon  # noqa: E402
 
 from fdup._core.types import Grid, GridType  # noqa: E402
 from fdup.utils.flowacc import flow_accumulation  # noqa: E402
 from fdup.utils.tree import river_tree  # noqa: E402
-from fdup.utils.vectorization import vectorize_network, vectorize_tree  # noqa: E402
+from fdup.utils.vectorization import (  # noqa: E402
+    vectorize_network,
+    vectorize_tree,
+    vectorize_watershed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +329,66 @@ class TestVectorizeTree:
 
 
 # ---------------------------------------------------------------------------
+# vectorize_watershed
+# ---------------------------------------------------------------------------
+
+
+def _mask(arr: np.ndarray) -> Grid:
+    return Grid.create(
+        array=np.asarray(arr, dtype=np.bool_),
+        type=GridType.Mask,
+        transform=TRANSFORM,
+        crs=None,
+    )
+
+
+class TestVectorizeWatershed:
+
+    def test_empty_mask_returns_empty_multipolygon(self):
+        mp = vectorize_watershed(_mask(np.zeros((4, 4), dtype=bool)))
+        assert isinstance(mp, MultiPolygon)
+        assert mp.is_empty
+        assert len(mp.geoms) == 0
+
+    def test_single_true_cell_is_unit_square(self):
+        """Cell (0, 0) covers world bounds (0, 4, 1, 5) under TRANSFORM."""
+        arr = np.zeros((3, 3), dtype=bool)
+        arr[0, 0] = True
+        mp = vectorize_watershed(_mask(arr))
+        assert len(mp.geoms) == 1
+        assert mp.area == pytest.approx(1.0)
+        assert mp.bounds == pytest.approx((0.0, 4.0, 1.0, 5.0))
+
+    def test_solid_2x2_block_one_part(self):
+        arr = np.ones((2, 2), dtype=bool)
+        mp = vectorize_watershed(_mask(arr))
+        assert len(mp.geoms) == 1
+        assert mp.area == pytest.approx(4.0)
+
+    def test_two_disconnected_cells_two_parts(self):
+        arr = np.zeros((3, 3), dtype=bool)
+        arr[0, 0] = True
+        arr[0, 2] = True
+        mp = vectorize_watershed(_mask(arr))
+        assert len(mp.geoms) == 2
+        assert mp.area == pytest.approx(2.0)
+
+    def test_donut_has_one_interior_ring(self):
+        arr = np.ones((3, 3), dtype=bool)
+        arr[1, 1] = False
+        mp = vectorize_watershed(_mask(arr))
+        assert len(mp.geoms) == 1
+        poly = mp.geoms[0]
+        assert isinstance(poly, Polygon)
+        assert len(poly.interiors) == 1
+        assert mp.area == pytest.approx(8.0)
+
+    def test_wrong_type_raises(self, fd):
+        with pytest.raises(ValueError):
+            vectorize_watershed(fd)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # vectorize_network — with CRS
 # ---------------------------------------------------------------------------
 
@@ -355,6 +419,7 @@ def test_public_api_exports():
     from fdup import utils
     assert hasattr(utils, "vectorize_network")
     assert hasattr(utils, "vectorize_tree")
+    assert hasattr(utils, "vectorize_watershed")
 
 
 # ---------------------------------------------------------------------------
