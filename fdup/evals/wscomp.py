@@ -34,7 +34,8 @@ from fdup._core.validation import (
 )
 
 _PREP_HINT = (
-    "Hint: call utils.disaggregate_mask() on the coarse mask, then "
+    "Hint: call utils.disaggregate_mask(mask, k) on the coarse mask "
+    "(k is a positive int or a (kx, ky) tuple matching the upscaler), then "
     "utils.match_grids() to align it with the fine mask before comparing."
 )
 
@@ -44,9 +45,10 @@ def compare_watersheds(mask1: Grid, mask2: Grid) -> tuple[float, Grid]:
 
     The two masks must be already aligned (same shape, same transform, same
     CRS).  The most common reason they are *not* aligned is that one mask
-    comes from a coarse-resolution flow direction grid; in that case, upscale
-    it first with :func:`fdup.utils.disaggregate_mask` and then align with
-    :func:`fdup.utils.match_grids`.
+    comes from a coarse-resolution flow direction grid; in that case, expand
+    it first with :func:`fdup.utils.disaggregate_mask` (``k`` as a positive
+    integer or a ``(kx, ky)`` tuple matching the upscaler) and then align
+    with :func:`fdup.utils.match_grids`.
 
     Parameters
     ----------

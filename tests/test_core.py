@@ -9,7 +9,7 @@ import pytest
 from affine import Affine
 
 from fdup._core.types import Grid, GridMeta, GridType
-from fdup._core.validation import check_aligned
+from fdup._core.validation import check_aligned, normalize_k
 from fdup._core.geodesy import get_cell_areas
 from fdup._core.slicing import cell_slice
 from fdup._core.warmup import warmup, _FLOWACC_DTYPES
@@ -174,6 +174,21 @@ class TestCheckAligned:
         with pytest.raises(ValueError):
             check_aligned(coarse, fine)
 
+    def test_aligned_anisotropic_kx_ne_ky(self):
+        kx, ky = 2, 4
+        fine_shape = (8, 8)
+        lon0, lat0 = 0.0, 10.0
+        fine_transform = Affine(0.01, 0.0, lon0, 0.0, -0.01, lat0)
+        coarse_transform = Affine(kx * 0.01, 0.0, lon0, 0.0, -ky * 0.01, lat0)
+        fine = Grid.create(
+            np.zeros(fine_shape, dtype=np.uint8), GridType.FlowDir, fine_transform
+        )
+        coarse_shape = (fine_shape[0] // ky, fine_shape[1] // kx)
+        coarse = Grid.create(
+            np.zeros(coarse_shape, dtype=np.uint8), GridType.FlowDir, coarse_transform
+        )
+        assert check_aligned(coarse, fine) == (kx, ky, 0, 0)
+
 
 # ---------------------------------------------------------------------------
 # get_cell_areas
@@ -266,10 +281,93 @@ class TestCellSlice:
         assert window.dtype == np.float32
         assert window[0, 0] == pytest.approx(999.0)
 
+    def test_rectangular_interior(self):
+        # kx=2 columns, ky=3 rows → window shape (3, 2)
+        window = cell_slice(self.arr, 1, 2, (2, 3), fill=-1)
+        assert window.shape == (3, 2)
+        np.testing.assert_array_equal(window, self.arr[1:4, 2:4])
+
+    def test_rectangular_interior_is_view(self):
+        window = cell_slice(self.arr, 0, 0, (3, 2), fill=0)
+        assert window.shape == (2, 3)
+        assert np.shares_memory(window, self.arr)
+
+    def test_rectangular_overflow(self):
+        # 6×6 array, start at (5, 4) with ky=3, kx=2 overflows
+        window = cell_slice(self.arr, 5, 4, (2, 3), fill=-1)
+        assert window.shape == (3, 2)
+        np.testing.assert_array_equal(window[0, :], self.arr[5, 4:6])
+        assert window[1, 0] == -1
+        assert window[0, 0] == self.arr[5, 4]
+
+    def test_tuple_kk_matches_int(self):
+        a = cell_slice(self.arr, 1, 1, 3, fill=-1)
+        b = cell_slice(self.arr, 1, 1, (3, 3), fill=-1)
+        np.testing.assert_array_equal(a, b)
+
 
 # ---------------------------------------------------------------------------
 # warmup (trivial smoke — it is a no-op in Phase 1)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# normalize_k
+# ---------------------------------------------------------------------------
+
+class TestNormalizeK:
+    def test_int_isotropic(self):
+        assert normalize_k(4) == (4, 4)
+
+    def test_tuple(self):
+        assert normalize_k((4, 2)) == (4, 2)
+
+    def test_list(self):
+        assert normalize_k([3, 5]) == (3, 5)
+
+    def test_even_ok(self):
+        assert normalize_k((4, 2), even=True) == (4, 2)
+        assert normalize_k(6, even=True) == (6, 6)
+
+    def test_even_odd_kx_raises(self):
+        with pytest.raises(ValueError, match="kx"):
+            normalize_k((3, 4), even=True)
+
+    def test_even_odd_ky_raises(self):
+        with pytest.raises(ValueError, match="ky"):
+            normalize_k((4, 3), even=True)
+
+    def test_bad_length_raises(self):
+        with pytest.raises(ValueError):
+            normalize_k((4, 2, 1))
+        with pytest.raises(ValueError):
+            normalize_k((4,))
+
+    def test_non_int_members_raise(self):
+        with pytest.raises(ValueError, match="kx"):
+            normalize_k((4.0, 2))
+        with pytest.raises(ValueError, match="ky"):
+            normalize_k((2, 4.0))
+
+    def test_bool_rejected(self):
+        with pytest.raises(ValueError):
+            normalize_k(True)
+        with pytest.raises(ValueError, match="kx"):
+            normalize_k((True, 2))
+
+    def test_zero_and_negative_raise(self):
+        with pytest.raises(ValueError):
+            normalize_k(0)
+        with pytest.raises(ValueError, match="ky"):
+            normalize_k((2, -1))
+
+    def test_custom_name_in_error(self):
+        with pytest.raises(ValueError, match="scale"):
+            normalize_k(0, name="scale")
+
+    def test_exported_from_core(self):
+        from fdup._core import normalize_k as exported
+        assert exported is normalize_k
+
 
 class TestWarmup:
     def test_warmup_runs_without_error(self):

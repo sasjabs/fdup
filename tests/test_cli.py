@@ -116,6 +116,31 @@ def test_cli_dmm(rasters, tmp_path):
     assert g.shape == (NC, NC)
 
 
+def test_cli_dmm_anisotropic_k(rasters, tmp_path):
+    out = tmp_path / "fd_dmm_aniso.tif"
+    _run(["dmm", "--flowacc", rasters["fa_fine"], "-o", str(out), "-k", "4", "2"])
+    assert out.exists()
+    g = fdup_io.read(str(out), grid_type=GridType.FlowDir)
+    assert g.meta.type == GridType.FlowDir
+    # kx=4 (cols), ky=2 (rows) → DMM shape (N//ky, N//kx) = (8, 4)
+    assert g.shape == (N // 2, N // 4)
+    assert abs(g.meta.transform.a - FINE_TRANSFORM.a * 4) < 1e-9
+    assert abs(g.meta.transform.e - FINE_TRANSFORM.e * 2) < 1e-9
+
+
+def test_cli_k_three_values_rejected(rasters, tmp_path):
+    out = tmp_path / "fd_bad.tif"
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "dmm",
+            "--flowacc", rasters["fa_fine"],
+            "-o", str(out),
+            "-k", "4", "2", "3",
+        ])
+    assert exc.value.code != 0
+    assert not out.exists()
+
+
 # ---------------------------------------------------------------------------
 # nsa
 # ---------------------------------------------------------------------------

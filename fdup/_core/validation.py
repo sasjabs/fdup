@@ -193,3 +193,72 @@ def check_aligned(
         )
 
     return kx, ky, off_r, off_c
+
+
+def _positive_int(value: object, axis_name: str) -> int:
+    """Return *value* if it is a positive ``int`` (not ``bool``); else raise."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"{axis_name} must be a positive integer, got {value!r}."
+        )
+    return value
+
+
+def normalize_k(
+    k: int | tuple[int, int],
+    *,
+    even: bool = False,
+    name: str = "k",
+) -> tuple[int, int]:
+    """Normalize *k* to ``(kx, ky)`` with per-axis validation.
+
+    *kx* is the X-axis / column scale (``transform.a``); *ky* is the Y-axis /
+    row scale (``transform.e``).  A coarse cell covers a fine window of
+    ``ky`` rows by ``kx`` columns.
+
+    Parameters
+    ----------
+    k:
+        Positive integer (isotropic; returned as ``(k, k)``) or a length-2
+        tuple/list ``(kx, ky)`` of positive integers.  Bools and floats are
+        rejected.
+    even:
+        When ``True``, require both *kx* and *ky* to be even (DMM).
+    name:
+        Parameter name used in error messages for the whole argument (not
+        the individual axes).
+
+    Returns
+    -------
+    (kx, ky) : tuple[int, int]
+
+    Raises
+    ------
+    ValueError
+        If *k* is not a positive integer or a length-2 sequence of positive
+        integers, or (when *even* is ``True``) if either axis is odd.  Axis
+        failures name ``kx`` or ``ky``.
+    """
+    if isinstance(k, int) and not isinstance(k, bool):
+        kx = ky = _positive_int(k, name)
+    elif isinstance(k, (tuple, list)):
+        if len(k) != 2:
+            raise ValueError(
+                f"{name} must be an int or a length-2 (kx, ky) sequence, "
+                f"got {k!r}."
+            )
+        kx = _positive_int(k[0], "kx")
+        ky = _positive_int(k[1], "ky")
+    else:
+        raise ValueError(
+            f"{name} must be an int or a length-2 (kx, ky) sequence, "
+            f"got {k!r}."
+        )
+
+    if even:
+        if kx % 2 != 0:
+            raise ValueError(f"kx must be even, got {kx}.")
+        if ky % 2 != 0:
+            raise ValueError(f"ky must be even, got {ky}.")
+
+    return kx, ky

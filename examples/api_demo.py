@@ -20,8 +20,9 @@ from fdup._core.types import Grid, GridType
 # Configuration
 # ---------------------------------------------------------------------------
 
-K = 4                   # upscaling factor (must be even for DMM)
-GRID_SIZE = 32          # fine-grid side length (32x32 → 8x8 coarse)
+K = 4                   # isotropic upscaling factor (must be even for DMM)
+K_ANISO = (4, 2)        # (kx, ky) = (columns, rows); both even for DMM
+GRID_SIZE = 32          # fine-grid side length (32x32 → 8x8 coarse at k=4)
 OUT_DIR = Path("examples/outputs")
 
 # Pour point in CRS units (geographic degrees for this synthetic grid)
@@ -57,7 +58,7 @@ def main() -> None:
     print("=== fdup functional-API demo ===\n")
 
     # -- 1. Warmup JIT kernels -----------------------------------------------
-    print("[1/10] Warming up JIT kernels (first run compiles; subsequent runs are fast)…")
+    print("[1/11] Warming up JIT kernels (first run compiles; subsequent runs are fast)…")
     fdup.warmup()
     print("       done.\n")
 
@@ -69,20 +70,20 @@ def main() -> None:
     transform_fine = _make_transform(GRID_SIZE, origin_x=origin_x, origin_y=origin_y, res=res_fine)
     dem = _make_dem(GRID_SIZE, transform_fine)
 
-    print(f"[2/10] Synthetic DEM: shape={dem.shape}, dtype={dem.array.dtype}, "
+    print(f"[2/11] Synthetic DEM: shape={dem.shape}, dtype={dem.array.dtype}, "
           f"transform={dem.meta.transform}")
     fdup.io.write(dem, OUT_DIR / "dem.tif", overwrite=True)
     print()
 
     # -- 3. Compute fine-resolution D8 flow direction -------------------------
-    print("[3/10] Computing fine-resolution D8 flow directions…")
+    print("[3/11] Computing fine-resolution D8 flow directions…")
     fd_fine = fdup.utils.d8(dem, spherical=True)
     print(f"       FlowDir shape={fd_fine.shape}, dtype={fd_fine.array.dtype}")
     fdup.io.write(fd_fine, OUT_DIR / "flowdir_fine.tif", overwrite=True)
     print()
 
     # -- 4. Compute fine-resolution flow accumulation -------------------------
-    print("[4/10] Computing fine-resolution flow accumulation (cell counts)…")
+    print("[4/11] Computing fine-resolution flow accumulation (cell counts)…")
     fa_fine = fdup.utils.flow_accumulation(fd_fine, area=False)
     print(f"       FlowAcc shape={fa_fine.shape}, dtype={fa_fine.array.dtype}, "
           f"max={np.nanmax(fa_fine.array):.0f} cells")
@@ -90,22 +91,34 @@ def main() -> None:
     print()
 
     # -- 5. Upscale with DMM --------------------------------------------------
-    print(f"[5/10] Upscaling with DMM (k={K})…")
+    print(f"[5/11] Upscaling with DMM (k={K})…")
     fd_coarse = fdup.upscalers.DMM(fa_fine, k=K)
     print(f"       Coarse FlowDir shape={fd_coarse.shape}, dtype={fd_coarse.array.dtype}")
     fdup.io.write(fd_coarse, OUT_DIR / "flowdir_coarse_dmm.tif", overwrite=True)
     print()
 
-    # -- 6. Compute coarse flow accumulation ----------------------------------
-    print("[6/10] Computing coarse flow accumulation (cell counts)…")
+    # -- 6. Anisotropic upscale (kx, ky) --------------------------------------
+    print(f"[6/11] Anisotropic DMM/NSA with k={K_ANISO} "
+          f"(kx=columns / transform.a, ky=rows / transform.e)…")
+    fd_dmm_aniso = fdup.upscalers.DMM(fa_fine, k=K_ANISO)
+    fd_nsa_aniso = fdup.upscalers.NSA(fa_fine, k=K_ANISO)
+    t_aniso = fd_dmm_aniso.meta.transform
+    print(f"       DMM anisotropic: shape={fd_dmm_aniso.shape}, "
+          f"pixel size a={t_aniso.a}, e={t_aniso.e}")
+    print(f"       NSA anisotropic: shape={fd_nsa_aniso.shape}")
+    fdup.io.write(fd_dmm_aniso, OUT_DIR / "flowdir_coarse_dmm_aniso.tif", overwrite=True)
+    print()
+
+    # -- 7. Compute coarse flow accumulation ----------------------------------
+    print("[7/11] Computing coarse flow accumulation (cell counts)…")
     fa_coarse = fdup.utils.flow_accumulation(fd_coarse, area=False)
     print(f"       FlowAcc shape={fa_coarse.shape}, dtype={fa_coarse.array.dtype}, "
           f"max={np.nanmax(fa_coarse.array):.0f} cells")
     fdup.io.write(fa_coarse, OUT_DIR / "flowacc_coarse.tif", overwrite=True)
     print()
 
-    # -- 7. Snap pour points --------------------------------------------------
-    print(f"[7/10] Snapping pour points near ({POUR_X}, {POUR_Y}) "
+    # -- 8. Snap pour points --------------------------------------------------
+    print(f"[8/11] Snapping pour points near ({POUR_X}, {POUR_Y}) "
           f"within radius={SNAP_RADIUS} degrees…")
     pour_row_fine, pour_col_fine = fdup.utils.snap_pour_cell(
         fa_fine, x=POUR_X, y=POUR_Y, radius=SNAP_RADIUS
@@ -117,8 +130,8 @@ def main() -> None:
     print(f"       Coarse pour cell: row={pour_row_coarse}, col={pour_col_coarse}")
     print()
 
-    # -- 8. Delineate watersheds ----------------------------------------------
-    print("[8/10] Delineating watersheds…")
+    # -- 9. Delineate watersheds ----------------------------------------------
+    print("[9/11] Delineating watersheds…")
     ws_fine = fdup.utils.delineate_watershed(fd_fine, pour_row_fine, pour_col_fine)
     ws_coarse = fdup.utils.delineate_watershed(fd_coarse, pour_row_coarse, pour_col_coarse)
     fine_cells = int(ws_fine.array.sum())
@@ -129,8 +142,8 @@ def main() -> None:
     fdup.io.write(ws_coarse, OUT_DIR / "watershed_coarse.tif", overwrite=True)
     print()
 
-    # -- 9. Disaggregate + align coarse watershed to fine grid ----------------
-    print(f"[9/10] Disaggregating coarse mask by k={K} and aligning to fine grid…")
+    # -- 10. Disaggregate + align coarse watershed to fine grid ---------------
+    print(f"[10/11] Disaggregating coarse mask by k={K} and aligning to fine grid…")
     ws_coarse_disagg = fdup.utils.disaggregate_mask(ws_coarse, k=K)
     ws_coarse_matched = fdup.utils.match_grids(reference=ws_fine, other=ws_coarse_disagg)
     print(f"       Disaggregated shape: {ws_coarse_disagg.shape}")
@@ -138,8 +151,8 @@ def main() -> None:
     fdup.io.write(ws_coarse_matched, OUT_DIR / "watershed_coarse_matched.tif", overwrite=True)
     print()
 
-    # -- 10. Compare watersheds -----------------------------------------------
-    print("[10/10] Comparing fine vs coarse-upscaled watershed (squared Ochiai index)…")
+    # -- 11. Compare watersheds -----------------------------------------------
+    print("[11/11] Comparing fine vs coarse-upscaled watershed (squared Ochiai index)…")
     ochiai, intersection = fdup.evals.compare_watersheds(ws_fine, ws_coarse_matched)
     inter_cells = int(intersection.array.sum())
     fdup.io.write(intersection, OUT_DIR / "watershed_intersection.tif", overwrite=True)
@@ -152,6 +165,7 @@ def main() -> None:
     print("  flowdir_fine.tif")
     print("  flowacc_fine.tif")
     print("  flowdir_coarse_dmm.tif")
+    print("  flowdir_coarse_dmm_aniso.tif")
     print("  flowacc_coarse.tif")
     print("  watershed_fine.tif")
     print("  watershed_coarse.tif")

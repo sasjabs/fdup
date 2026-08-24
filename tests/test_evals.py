@@ -229,3 +229,40 @@ def test_compare_watersheds_shape_mismatch_raises(pipeline) -> None:
     )
     with pytest.raises(ValueError):
         compare_watersheds(p["ws_fine"], small_mask)
+
+
+# ---------------------------------------------------------------------------
+# Anisotropic k=(kx, ky) round trip through check_aligned / evals
+# ---------------------------------------------------------------------------
+
+
+def test_anisotropic_eval_roundtrip(pipeline) -> None:
+    """Upscale with k=(2, 4); check_aligned, compare_flowdir, and huac all run."""
+    from fdup._core.validation import check_aligned
+
+    p = pipeline
+    kx, ky = 2, 4
+    fd_coarse = DMM(p["fa_fine"], k=(kx, ky))
+    fa_coarse = flow_accumulation(fd_coarse, area=False)
+
+    assert check_aligned(fd_coarse, p["fa_fine"]) == (kx, ky, 0, 0)
+    assert fd_coarse.shape == (N // ky, N // kx)
+
+    nc_r, nc_c = fd_coarse.shape
+    err_grid, df = huac(
+        p["fa_fine"],
+        fd_coarse,
+        fa_coarse,
+        pour_row=nc_r - 1,
+        pour_col=nc_c - 1,
+    )
+    assert err_grid.shape == fd_coarse.shape
+    assert list(df.columns) == list(_TABLE_COLUMNS)
+
+    scores = compare_flowdir(p["fd_fine"], fd_coarse, p["seeds"], shuffle=False)
+    assert scores.dtype == np.float32
+    assert scores.shape == (len(p["seeds"]),)
+    non_degenerate = scores[scores >= 0.0]
+    if len(non_degenerate) > 0:
+        assert non_degenerate.min() >= 0.0
+        assert non_degenerate.max() <= 1.0
