@@ -6,7 +6,7 @@
 
 - **DMM** (Double Maximum Method) — [Olivera et al., 2002](https://doi.org/10.1029/2001WR000726)
 - **NSA** (Network Scaling Algorithm) — [Fekete et al., 2001](https://doi.org/10.1029/2001WR900024)
-- **COTAT / COTAT+** (Cell Outlet Tracing with an Area Threshold) — [Reed, 2003](https://doi.org/10.1029/2003WR001989)
+- **COTAT / COTAT+** (Cell Outlet Tracing with an Area Threshold) — [Reed, 2003](https://doi.org/10.1029/2003WR001989), [Paz et al., 2006](https://doi.org/10.1029/2005WR004544)
 
 ---
 
