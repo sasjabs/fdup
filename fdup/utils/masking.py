@@ -3,7 +3,7 @@
 Functions
 ---------
 disaggregate_mask(mask, k) -> Grid
-    Disaggregate a Mask Grid by integer factor *k* (moved from watershed.py).
+    Disaggregate a Mask Grid by *k* (int or ``(kx, ky)``; moved from watershed.py).
 mask_area(mask) -> float
     Total area of True-valued cells (moved from watershed.py).
 threshold_mask(grid, cutoff) -> Grid
@@ -26,6 +26,7 @@ from fdup._core.validation import (
     check_shape_match,
     check_transform_match,
     check_type,
+    normalize_k,
 )
 
 
@@ -34,7 +35,7 @@ from fdup._core.validation import (
 # ---------------------------------------------------------------------------
 
 
-def disaggregate_mask(mask: Grid, k: int) -> Grid:
+def disaggregate_mask(mask: Grid, k: int | tuple[int, int]) -> Grid:
     """Disaggregate a Mask Grid by factor *k* (pure numpy).
 
     Parameters
@@ -42,23 +43,25 @@ def disaggregate_mask(mask: Grid, k: int) -> Grid:
     mask :
         ``GridType.Mask``, bool.
     k :
-        Positive integer scale factor.  Each cell becomes a k×k block with
-        the same value.
+        Positive integer scale factor (isotropic; equivalent to ``(k, k)``)
+        or a length-2 ``(kx, ky)`` tuple of positive integers.  *kx* is the
+        X-axis / column scale (``transform.a``); *ky* is the Y-axis / row
+        scale (``transform.e``).  Each coarse cell becomes a ``ky``×``kx``
+        (rows × cols) block with the same value.
 
     Returns
     -------
     Grid
-        ``GridType.Mask``, bool, shape ``(nrows*k, ncols*k)``.  The output
-        transform has pixel spacing ``a/k`` and ``e/k``; the origin is
+        ``GridType.Mask``, bool, shape ``(nrows*ky, ncols*kx)``.  The output
+        transform has pixel spacing ``a/kx`` and ``e/ky``; the origin is
         unchanged.
     """
     check_type(mask, GridType.Mask)
-    if not isinstance(k, int) or k <= 0:
-        raise ValueError(f"k must be a positive integer, got {k!r}.")
+    kx, ky = normalize_k(k)
 
-    out = np.repeat(np.repeat(mask.array, k, axis=0), k, axis=1)
+    out = np.repeat(np.repeat(mask.array, ky, axis=0), kx, axis=1)
     t = mask.meta.transform
-    out_transform = Affine(t.a / k, t.b, t.c, t.d, t.e / k, t.f)
+    out_transform = Affine(t.a / kx, t.b, t.c, t.d, t.e / ky, t.f)
     return Grid.create(
         array=out,
         type=GridType.Mask,

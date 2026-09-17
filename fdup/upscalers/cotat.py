@@ -26,7 +26,7 @@ from fdup._core.geodesy import row_distance_table
 from fdup._core.types import Grid, GridType
 from fdup._core.validation import (
     check_crs_match, check_dtype, check_shape_match,
-    check_transform_match, check_type,
+    check_transform_match, check_type, normalize_k,
 )
 
 
@@ -35,15 +35,18 @@ from fdup._core.validation import (
 # =========================================================================
 
 @njit(cache=True)
-def _find_largest_in_cell(flowacc, i, j, k):
-    """Find pixel with largest flow accumulation in cell (i, j)."""
-    r0 = i * k
-    c0 = j * k
+def _find_largest_in_cell(flowacc, i, j, kx, ky):
+    """Find pixel with largest flow accumulation in cell (i, j).
+
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns.
+    """
+    r0 = i * ky
+    c0 = j * kx
     best_r = r0
     best_c = c0
     best_val = np.float64(flowacc[r0, c0])
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             v = np.float64(flowacc[r, c])
             if v > best_val:
                 best_val = v
@@ -67,16 +70,19 @@ def _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols, flowdir_ndv, has_ndv):
 
 
 @njit(cache=True)
-def _largest_valid_in_cell(flowdir, flowacc, i, j, k,
+def _largest_valid_in_cell(flowdir, flowacc, i, j, kx, ky,
                            orig_nrows, orig_ncols, flowdir_ndv, has_ndv):
-    """Largest-flowacc *valid* pixel of cell (i, j); ignores padded/nodata pixels."""
-    r0 = i * k
-    c0 = j * k
+    """Largest-flowacc *valid* pixel of cell (i, j); ignores padded/nodata pixels.
+
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns.
+    """
+    r0 = i * ky
+    c0 = j * kx
     best_r = r0
     best_c = c0
     best_val = -np.inf
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
@@ -89,23 +95,25 @@ def _largest_valid_in_cell(flowdir, flowacc, i, j, k,
 
 
 @njit(cache=True)
-def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
+def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, kx, ky,
                                 orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                                 row_dists,
                                 decode_dr, decode_dc, decode_valid,
                                 dir_drow, dir_dcol):
     """Length of the upstream flow path of pixel (sr, sc) confined to cell (i, j).
 
-    At each junction the inflowing neighbour with the largest upstream area is
-    followed.  Step lengths are taken from *row_dists* (metres, COMPASS_ORDER),
-    so the returned path length is in **metres**.
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns; tracing stops
+    after at most ``kx*ky`` steps.  At each junction the inflowing neighbour
+    with the largest upstream area is followed.  Step lengths are taken from
+    *row_dists* (metres, COMPASS_ORDER), so the returned path length is in
+    **metres**.
     """
-    r0 = i * k
-    c0 = j * k
+    r0 = i * ky
+    c0 = j * kx
     cur_r = sr
     cur_c = sc
     total = 0.0
-    max_steps = k * k
+    max_steps = kx * ky
     steps = 0
 
     while steps < max_steps:
@@ -119,7 +127,7 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
             ddc = np.intp(dir_dcol[d])
             nr = cur_r + ddr
             nc = cur_c + ddc
-            if nr < r0 or nr >= r0 + k or nc < c0 or nc >= c0 + k:
+            if nr < r0 or nr >= r0 + ky or nc < c0 or nc >= c0 + kx:
                 continue
             if not _pixel_valid(flowdir, nr, nc, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
@@ -149,27 +157,31 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, k,
 
 
 @njit(cache=True)
-def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
+def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
                            orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                            mufp, row_dists, decode_dr, decode_dc, decode_valid,
                            dir_drow, dir_dcol):
-    """COTAT+ outlet pixel for cell (i, j) using the MUFP selection scheme."""
-    r0 = i * k
-    c0 = j * k
+    """COTAT+ outlet pixel for cell (i, j) using the MUFP selection scheme.
+
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns.  Border capacity
+    is ``2*(kx + ky)``; the exit map is indexed as ``(r - r0)*kx + (c - c0)``.
+    """
+    r0 = i * ky
+    c0 = j * kx
 
     # Step 1: pixel with the largest upstream drainage area.
-    lr1, lc1 = _largest_valid_in_cell(flowdir, flowacc, i, j, k,
+    lr1, lc1 = _largest_valid_in_cell(flowdir, flowacc, i, j, kx, ky,
                                       orig_nrows, orig_ncols, flowdir_ndv, has_ndv)
 
     # Collect border out-facing pixels (valid flow direction leaving the cell).
-    cap = 4 * k
+    cap = 2 * (kx + ky)
     bo_r = np.empty(cap, dtype=np.int64)
     bo_c = np.empty(cap, dtype=np.int64)
     bo_fa = np.empty(cap, dtype=np.float64)
-    exit_map = np.full(k * k, -1, dtype=np.int64)
+    exit_map = np.full(kx * ky, -1, dtype=np.int64)
     nb = 0
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
@@ -181,11 +193,11 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
                 continue
             dr2 = r + np.intp(decode_dr[fi])
             dc2 = c + np.intp(decode_dc[fi])
-            if dr2 < r0 or dr2 >= r0 + k or dc2 < c0 or dc2 >= c0 + k:
+            if dr2 < r0 or dr2 >= r0 + ky or dc2 < c0 or dc2 >= c0 + kx:
                 bo_r[nb] = r
                 bo_c[nb] = c
                 bo_fa[nb] = np.float64(flowacc[r, c])
-                exit_map[(r - r0) * k + (c - c0)] = nb
+                exit_map[(r - r0) * kx + (c - c0)] = nb
                 nb += 1
 
     # Sink case, or the largest pixel is not itself a border out-facing pixel.
@@ -201,18 +213,18 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
 
     # Step 2: border out-facing pixel draining the largest portion of the cell.
     counts = np.zeros(nb, dtype=np.int64)
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
             cr = r
             cc = c
             steps = 0
-            max_steps = k * k
+            max_steps = kx * ky
             while steps < max_steps:
                 steps += 1
-                idx = exit_map[(cr - r0) * k + (cc - c0)]
+                idx = exit_map[(cr - r0) * kx + (cc - c0)]
                 if idx >= 0:
                     counts[idx] += 1
                     break
@@ -224,7 +236,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
                     break
                 ncr = cr + np.intp(decode_dr[fi])
                 ncc = cc + np.intp(decode_dc[fi])
-                if ncr < r0 or ncr >= r0 + k or ncc < c0 or ncc >= c0 + k:
+                if ncr < r0 or ncr >= r0 + ky or ncc < c0 or ncc >= c0 + kx:
                     break
                 cr = ncr
                 cc = ncc
@@ -249,7 +261,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
             break
         used[sel] = True
         path = _trace_upstream_within_cell(
-            flowdir, flowacc, np.intp(bo_r[sel]), np.intp(bo_c[sel]), i, j, k,
+            flowdir, flowacc, np.intp(bo_r[sel]), np.intp(bo_c[sel]), i, j, kx, ky,
             orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
             row_dists,
             decode_dr, decode_dc, decode_valid, dir_drow, dir_dcol)
@@ -262,7 +274,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, k,
 
 
 @njit(cache=True, parallel=True)
-def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcols, k,
+def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcols, kx, ky,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                         use_mufp, mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol):
@@ -276,18 +288,18 @@ def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcol
             if not null_cells[i, j]:
                 if use_mufp:
                     r, c = _find_cell_outlet_mufp(
-                        flowdir, flowacc, i, j, k,
+                        flowdir, flowacc, i, j, kx, ky,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                         mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol)
                 else:
-                    r, c = _find_largest_in_cell(flowacc, i, j, k)
+                    r, c = _find_largest_in_cell(flowacc, i, j, kx, ky)
                 outlet_coords[i, j, 0] = r
                 outlet_coords[i, j, 1] = c
 
 
 @njit(cache=True)
-def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, k,
+def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, kx, ky,
                           orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                           area_threshold, decode_dr, decode_dc, decode_valid,
                           encode_dir):
@@ -298,6 +310,7 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, k,
     gain exceeds *area_threshold* (that cell becomes the receiving cell), or
     until the path hits a sink/shoreline or leaves the 3x3 neighbourhood (the
     receiving cell is then the cell of the last visited pixel).
+    The coarse cell of a fine pixel is ``(r // ky, c // kx)``.
     """
     cur_r = np.intp(outlet_coords[ci, cj, 0])
     cur_c = np.intp(outlet_coords[ci, cj, 1])
@@ -331,8 +344,8 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, k,
         cur_c = next_c
 
         # out_of_neighborhood(source_cell, current_cell)
-        cur_ci = cur_r // k
-        cur_cj = cur_c // k
+        cur_ci = cur_r // ky
+        cur_cj = cur_c // kx
         if abs(cur_ci - ci) > 1 or abs(cur_cj - cj) > 1:
             break
 
@@ -347,8 +360,8 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, k,
                 break
 
     if recv_ci < 0:
-        recv_ci = prev_r // k
-        recv_cj = prev_c // k
+        recv_ci = prev_r // ky
+        recv_cj = prev_c // kx
 
     diff_r = recv_ci - ci
     diff_c = recv_cj - cj
@@ -359,7 +372,7 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, k,
 
 @njit(cache=True, parallel=True)
 def _assign_all_directions(flowdir, flowacc, outlet_coords, cells, null_cells,
-                           k, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                           kx, ky, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                            area_threshold, decode_dr, decode_dc, decode_valid,
                            encode_dir, mrows, mcols):
     """Assign D8 directions for all non-null cells (parallel over rows)."""
@@ -367,7 +380,7 @@ def _assign_all_directions(flowdir, flowacc, outlet_coords, cells, null_cells,
         for j in range(mcols):
             if not null_cells[i, j]:
                 cells[i, j] = _trace_cell_direction(
-                    flowdir, flowacc, outlet_coords, i, j, k,
+                    flowdir, flowacc, outlet_coords, i, j, kx, ky,
                     orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
                     area_threshold, decode_dr, decode_dc, decode_valid,
                     encode_dir)
@@ -420,38 +433,39 @@ def _warmup(dtype=np.float64):
     flowdir_ndv = np.uint8(255)
 
     # Plain COTAT outlets + tracing + intersection fixing (2x2 cell grid).
-    k = 1
+    kx = ky = 1
     mrows = mcols = 2
-    n = mrows * k
-    flowdir = np.zeros((n, n), dtype=np.uint8)
-    flowacc = np.ones((n, n), dtype=dtype)
+    n_rows = mrows * ky
+    n_cols = mcols * kx
+    flowdir = np.zeros((n_rows, n_cols), dtype=np.uint8)
+    flowacc = np.ones((n_rows, n_cols), dtype=dtype)
     null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     cells = np.full((mrows, mcols), 255, dtype=np.uint8)
-    row_dists = np.ones((n, 8), dtype=np.float64) * 1000.0
+    row_dists = np.ones((n_rows, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
-                        mrows, mcols, k, n, n, flowdir_ndv, True,
+                        mrows, mcols, kx, ky, n_rows, n_cols, flowdir_ndv, True,
                         False, 0.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
     _assign_all_directions(flowdir, flowacc, outlet_coords, cells,
-                           null_cells, k, n, n, flowdir_ndv, True,
+                           null_cells, kx, ky, n_rows, n_cols, flowdir_ndv, True,
                            0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
                            ENCODE_DIR, mrows, mcols)
     _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols)
 
-    # COTAT+ MUFP outlet selection (single 1x1 coarse cell with k=2).
-    k = 2
+    # COTAT+ MUFP outlet selection (single 1x1 coarse cell with kx=ky=2).
+    kx = ky = 2
     mrows = mcols = 1
-    n = 2
-    flowdir = np.ones((n, n), dtype=np.uint8)
+    n_rows = n_cols = 2
+    flowdir = np.ones((n_rows, n_cols), dtype=np.uint8)
     flowacc = np.array([[1, 2], [1, 2]], dtype=dtype)
     null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
-    row_dists = np.ones((n, 8), dtype=np.float64) * 1000.0
+    row_dists = np.ones((n_rows, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
-                        mrows, mcols, k, n, n, flowdir_ndv, True,
+                        mrows, mcols, kx, ky, n_rows, n_cols, flowdir_ndv, True,
                         True, 500.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
 
@@ -466,7 +480,7 @@ _FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.floa
 def COTAT(
     flowdir: Grid,
     flowacc: Grid,
-    k: int,
+    k: int | tuple[int, int],
     *,
     area_threshold: float = 0.0,
     mufp: float | None = None,
@@ -482,7 +496,11 @@ def COTAT(
         a supported dtype (int32/uint32/int64/uint64/float32/float64).
         Must match *flowdir* in shape, transform, and CRS.
     k:
-        Upscaling factor.  Must be a positive integer.
+        Upscaling factor.  A positive integer (isotropic; equivalent to
+        ``(k, k)``) or a length-2 ``(kx, ky)`` tuple of positive integers.
+        *kx* is the X-axis / column scale (``transform.a``); *ky* is the
+        Y-axis / row scale (``transform.e``).  A coarse cell covers a fine
+        window of ``ky`` rows by ``kx`` columns.
     area_threshold:
         Minimum accumulated-area gain required at a downstream cell outlet
         for that cell to be selected as the receiving cell while tracing.
@@ -495,16 +513,17 @@ def COTAT(
     -------
     Grid
         Coarse flow-direction grid (``GridType.FlowDir``, uint8).  Shape is
-        ``(ceil(H/k), ceil(W/k))`` and the pixel size is ``k`` times the
-        fine-grid pixel size.
+        ``(ceil(H/ky), ceil(W/kx))``.  The output transform is
+        ``Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)``.
 
     Notes
     -----
-    Both input arrays are copied into ``(ceil(H/k)*k, ceil(W/k)*k)`` buffers
-    before being passed to the JIT kernels.  The flowdir buffer is filled with
-    255 (nodata sentinel) and the flowacc buffer with 0 in the padded region.
-    The ``_pixel_valid`` kernel helper still uses ``orig_nrows / orig_ncols``
-    for bounds checking so padded pixels are correctly excluded.
+    Both input arrays are copied into ``(ceil(H/ky)*ky, ceil(W/kx)*kx)``
+    buffers before being passed to the JIT kernels.  The flowdir buffer is
+    filled with 255 (nodata sentinel) and the flowacc buffer with 0 in the
+    padded region.  The ``_pixel_valid`` kernel helper still uses
+    ``orig_nrows / orig_ncols`` for bounds checking so padded pixels are
+    correctly excluded.
     """
     check_type(flowdir, GridType.FlowDir)
     check_type(flowacc, GridType.FlowAcc)
@@ -512,16 +531,15 @@ def COTAT(
     check_shape_match(flowdir, flowacc)
     check_transform_match(flowdir, flowacc)
     check_crs_match(flowdir, flowacc)
-    if not isinstance(k, int) or k <= 0:
-        raise ValueError("COTAT requires a positive integer k")
+    kx, ky = normalize_k(k)
 
     orig_nrows, orig_ncols = flowdir.shape
 
     # Allocate ceil-padded buffers.  Extra cells are nodata (fd=255, fa=0).
-    ceil_rows = math.ceil(orig_nrows / k)
-    ceil_cols = math.ceil(orig_ncols / k)
-    pad_rows  = ceil_rows * k
-    pad_cols  = ceil_cols * k
+    ceil_rows = math.ceil(orig_nrows / ky)
+    ceil_cols = math.ceil(orig_ncols / kx)
+    pad_rows  = ceil_rows * ky
+    pad_cols  = ceil_cols * kx
     mrows     = ceil_rows
     mcols     = ceil_cols
 
@@ -544,7 +562,7 @@ def COTAT(
     valid = np.zeros((pad_rows, pad_cols), dtype=bool)
     valid[:orig_nrows, :orig_ncols] = fd_buf[:orig_nrows, :orig_ncols] != 255
     null_cells = ~np.any(
-        valid.reshape(mrows, k, mcols, k), axis=(1, 3)
+        valid.reshape(mrows, ky, mcols, kx), axis=(1, 3)
     )
     del valid
 
@@ -563,7 +581,7 @@ def COTAT(
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     _assign_all_outlets(
         fd_buf, fa_buf, null_cells, outlet_coords,
-        mrows, mcols, k, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+        mrows, mcols, kx, ky, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
         use_mufp, mufp_val, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
         DIR_DROW, DIR_DCOL,
     )
@@ -571,7 +589,7 @@ def COTAT(
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
     _assign_all_directions(
         fd_buf, fa_buf, outlet_coords,
-        cells, null_cells, k, orig_nrows, orig_ncols,
+        cells, null_cells, kx, ky, orig_nrows, orig_ncols,
         flowdir_ndv, has_ndv, area_threshold,
         DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
         mrows, mcols,
@@ -582,7 +600,7 @@ def COTAT(
     _fix_intersections_numba(cells, outlet_coords, fa_buf, mrows, mcols)
 
     t = flowdir.meta.transform
-    out_transform = Affine(t.a * k, t.b, t.c, t.d, t.e * k, t.f)
+    out_transform = Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)
 
     return Grid.create(
         array=cells,

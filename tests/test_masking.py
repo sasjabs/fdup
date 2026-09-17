@@ -155,6 +155,52 @@ class TestDisaggregateMask:
         with pytest.raises(ValueError):
             disaggregate_mask(fa, k=2)  # type: ignore[arg-type]
 
+    def test_tuple_k_shape(self):
+        arr = np.ones((3, 4), dtype=np.bool_)
+        out = disaggregate_mask(_mask(arr), k=(2, 3))  # kx=2 cols, ky=3 rows
+        assert out.shape == (9, 8)
+
+    def test_tuple_k_false_cell_expands_to_rectangular_block(self):
+        arr = np.array([[True, False], [True, True]], dtype=np.bool_)
+        out = disaggregate_mask(_mask(arr), k=(3, 2))  # kx=3, ky=2
+        assert out.shape == (4, 6)
+        # top-right ky×kx = 2×3 block should be False
+        assert not out.array[0:2, 3:6].any()
+        # other three blocks should be True
+        assert out.array[0:2, 0:3].all()
+        assert out.array[2:4, 0:3].all()
+        assert out.array[2:4, 3:6].all()
+
+    def test_tuple_k_transform_pixel_spacing(self):
+        arr = np.ones((4, 4), dtype=np.bool_)
+        t = Affine(0.5, 0.0, 10.0, 0.0, -0.5, 45.0)
+        out = disaggregate_mask(_mask(arr, transform=t), k=(4, 2))
+        assert math.isclose(out.meta.transform.a, 0.5 / 4)
+        assert math.isclose(out.meta.transform.e, -0.5 / 2)
+        assert math.isclose(out.meta.transform.c, t.c)
+        assert math.isclose(out.meta.transform.f, t.f)
+
+    def test_tuple_k_int_equivalent(self):
+        arr = np.array([[True, False], [False, True]], dtype=np.bool_)
+        out_int = disaggregate_mask(_mask(arr), k=2)
+        out_tuple = disaggregate_mask(_mask(arr), k=(2, 2))
+        np.testing.assert_array_equal(out_int.array, out_tuple.array)
+        assert out_int.meta.transform == out_tuple.meta.transform
+
+    def test_bad_tuple_length_raises(self):
+        arr = np.ones((2, 2), dtype=np.bool_)
+        with pytest.raises(ValueError):
+            disaggregate_mask(_mask(arr), k=(2, 3, 4))  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            disaggregate_mask(_mask(arr), k=(2,))  # type: ignore[arg-type]
+
+    def test_bad_tuple_non_int_raises(self):
+        arr = np.ones((2, 2), dtype=np.bool_)
+        with pytest.raises(ValueError):
+            disaggregate_mask(_mask(arr), k=(2.0, 3))  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            disaggregate_mask(_mask(arr), k=(2, 3.0))  # type: ignore[arg-type]
+
 
 # ---------------------------------------------------------------------------
 # mask_area

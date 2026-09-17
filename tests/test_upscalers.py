@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from affine import Affine
 
+from fdup._core.d8 import DIR_DIST
 from fdup._core.types import Grid, GridType
 from fdup.upscalers import DMM, NSA, COTAT
+from fdup.upscalers.nsa import _dir_distances
 
 # 0.01° pixels, origin at (0°E, 10°N)
 FINE_TRANSFORM = Affine(0.01, 0.0, 0.0, 0.0, -0.01, 10.0)
@@ -69,6 +73,31 @@ def _assert_upscaled(out: Grid, flowacc: Grid, k: int) -> None:
     )
 
 
+def _assert_anisotropic(out: Grid, flowacc: Grid, kx: int, ky: int, *, floor: bool) -> None:
+    """Shape is ceil(H/ky)×ceil(W/kx), or floor for DMM; transform is (a*kx, e*ky)."""
+    H, W = flowacc.shape
+    expected = (H // ky, W // kx) if floor else (math.ceil(H / ky), math.ceil(W / kx))
+    assert out.shape == expected, f"expected shape {expected}, got {out.shape}"
+    assert out.array.dtype == np.uint8
+    assert out.meta.type == GridType.FlowDir
+    t_in = flowacc.meta.transform
+    t_out = out.meta.transform
+    assert abs(t_out.a - t_in.a * kx) < 1e-9
+    assert abs(t_out.e - t_in.e * ky) < 1e-9
+
+
+def _assert_invalid_k(call) -> None:
+    """Reject bad tuple lengths and non-integer members."""
+    with pytest.raises(ValueError):
+        call((4, 2, 1))
+    with pytest.raises(ValueError):
+        call((4,))
+    with pytest.raises(ValueError):
+        call((4.0, 2))
+    with pytest.raises(ValueError):
+        call((2, 4.0))
+
+
 # ---------------------------------------------------------------------------
 # DMM
 # ---------------------------------------------------------------------------
@@ -104,6 +133,33 @@ class TestDMM:
         H, W = fa.shape
         assert out.shape == (H // 4, W // 4)
 
+    def test_dmm_int_k_matches_tuple_kk(self):
+        fa = _make_flowacc()
+        out_int = DMM(fa, k=4)
+        out_tuple = DMM(fa, k=(4, 4))
+        np.testing.assert_array_equal(out_int.array, out_tuple.array)
+        assert out_int.meta.transform == out_tuple.meta.transform
+
+    def test_dmm_anisotropic_shape_and_transform(self):
+        fa = _make_flowacc(shape=(12, 10))
+        kx, ky = 4, 2
+        out = DMM(fa, k=(kx, ky))
+        _assert_anisotropic(out, fa, kx, ky, floor=True)
+
+    def test_dmm_invalid_k_tuples(self):
+        fa = _make_flowacc()
+        _assert_invalid_k(lambda k: DMM(fa, k))
+
+    def test_dmm_odd_kx_raises(self):
+        fa = _make_flowacc()
+        with pytest.raises(ValueError, match="kx"):
+            DMM(fa, k=(3, 4))
+
+    def test_dmm_odd_ky_raises(self):
+        fa = _make_flowacc()
+        with pytest.raises(ValueError, match="ky"):
+            DMM(fa, k=(4, 3))
+
 
 # ---------------------------------------------------------------------------
 # NSA
@@ -127,6 +183,40 @@ class TestNSA:
         fa = _make_flowacc(shape=(8, 8))
         out = NSA(fa, k=4)
         assert out.shape == (2, 2)
+
+    def test_nsa_int_k_matches_tuple_kk(self):
+        fa = _make_flowacc()
+        out_int = NSA(fa, k=4)
+        out_tuple = NSA(fa, k=(4, 4))
+        np.testing.assert_array_equal(out_int.array, out_tuple.array)
+        assert out_int.meta.transform == out_tuple.meta.transform
+
+    def test_nsa_anisotropic_shape_and_transform(self):
+        fa = _make_flowacc(shape=(12, 10))
+        kx, ky = 4, 2
+        out = NSA(fa, k=(kx, ky))
+        _assert_anisotropic(out, fa, kx, ky, floor=False)
+
+    def test_nsa_invalid_k_tuples(self):
+        fa = _make_flowacc()
+        _assert_invalid_k(lambda k: NSA(fa, k))
+
+    @pytest.mark.parametrize("k", [1, 2, 3, 4, 6, 11, 12])
+    def test_nsa_square_cells_reuse_unit_distance_table(self, k):
+        """Square cells must use DIR_DIST itself, not a scaled copy.
+
+        A scaled copy rounds the diagonal entries differently (hypot(k, k)
+        != k*sqrt(2) for k = 3, 6, 11, 12), which could flip a near-tie
+        between a cardinal and a diagonal neighbour.
+        """
+        assert _dir_distances(k, k) is DIR_DIST
+
+    def test_nsa_rectangular_cells_weight_axes_separately(self):
+        dist = _dir_distances(kx=4, ky=2)
+        east, south_east, south = dist[0], dist[1], dist[2]
+        assert east == pytest.approx(4.0)
+        assert south == pytest.approx(2.0)
+        assert south_east == pytest.approx(math.hypot(2.0, 4.0))
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +285,23 @@ class TestCOTAT:
         out = COTAT(fd, fa, k=2, mufp=200.0)
         assert out.shape == (4, 4)
         assert out.array.dtype == np.uint8
+
+    def test_cotat_int_k_matches_tuple_kk(self):
+        fa = _make_flowacc()
+        fd = _make_flowdir()
+        out_int = COTAT(fd, fa, k=4)
+        out_tuple = COTAT(fd, fa, k=(4, 4))
+        np.testing.assert_array_equal(out_int.array, out_tuple.array)
+        assert out_int.meta.transform == out_tuple.meta.transform
+
+    def test_cotat_anisotropic_shape_and_transform(self):
+        fa = _make_flowacc(shape=(12, 10))
+        fd = _make_flowdir(shape=(12, 10))
+        kx, ky = 4, 2
+        out = COTAT(fd, fa, k=(kx, ky))
+        _assert_anisotropic(out, fa, kx, ky, floor=False)
+
+    def test_cotat_invalid_k_tuples(self):
+        fa = _make_flowacc()
+        fd = _make_flowdir()
+        _assert_invalid_k(lambda k: COTAT(fd, fa, k))

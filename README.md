@@ -41,9 +41,16 @@ import fdup
 fdup.warmup()
 
 fa = fdup.io.read("flowacc.tif", grid_type=fdup.GridType.FlowAcc)
-fd_coarse = fdup.upscalers.DMM(fa, k=4)
+fd_coarse = fdup.upscalers.DMM(fa, k=4)          # isotropic; same as k=(4, 4)
+fd_rect   = fdup.upscalers.DMM(fa, k=(4, 2))     # anisotropic (kx, ky)
 fdup.io.write(fd_coarse, "flowdir_coarse.tif", overwrite=True)
 ```
+
+`k` is a positive integer (isotropic, equivalent to `(k, k)`) or a `(kx, ky)` tuple:
+**`kx` is columns / `transform.a`; `ky` is rows / `transform.e`.**
+A coarse cell covers `ky` fine rows by `kx` fine columns, and the output
+transform is `Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)`.
+DMM requires both `kx` and `ky` to be even.
 
 See `examples/api_demo.py` for a fully self-contained pipeline that runs on a synthetic DEM.
 
@@ -69,11 +76,11 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 ### `fdup.upscalers`
 
 
-| Function                                              | Description                                                           |
-| ----------------------------------------------------- | --------------------------------------------------------------------- |
-| `DMM(flowacc, k)`                                     | Double Maximum Method. Requires even `k`. Returns `GridType.FlowDir`. |
-| `NSA(flowacc, k)`                                     | Network Scaling Algorithm. Returns `GridType.FlowDir`.                |
-| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. Returns `GridType.FlowDir`.                           |
+| Function                                              | Description                                                                                          |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `DMM(flowacc, k)`                                     | Double Maximum Method. `k` is an even int or `(kx, ky)` with both even. Returns `GridType.FlowDir`. |
+| `NSA(flowacc, k)`                                     | Network Scaling Algorithm. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                  |
+| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                             |
 
 
 
@@ -88,7 +95,7 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 | `strahler_order(flowdir)`                                                  | Compute Strahler stream orders via BFS. Returns `GridType.Strahler` (uint8; 0 = nodata/sink).                         |
 | `snap_pour_cell(flowacc, x, y, radius)`                                    | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`.                        |
 | `delineate_watershed(flowdir, pour_row, pour_col)`                         | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                                                   |
-| `disaggregate_mask(mask, k)`                                               | Expand a coarse mask by factor `k` (nearest-neighbour).                                                               |
+| `disaggregate_mask(mask, k)`                                               | Expand a coarse mask by `k` (int or `(kx, ky)`; nearest-neighbour).                                                   |
 | `match_grids(reference, other)`                                            | Crop/pad `other` to the same extent as `reference`.                                                                   |
 | `mask_area(mask)`                                                          | Total area of True-valued cells: km² for geographic CRS, CRS units² for projected CRS.                                |
 | `threshold_mask(grid, cutoff)`                                             | Boolean mask where `value >= cutoff`; nodata/NaN cells → False. Accepts `FlowAcc` or `Strahler`.                      |
@@ -144,15 +151,27 @@ fdup --help
 
 ### Upscaling
 
+`-k` takes one integer (isotropic) or two integers `kx ky` (anisotropic:
+`kx` = columns / `transform.a`, `ky` = rows / `transform.e`). DMM requires
+even values on both axes.
+
 ```bash
-# DMM
+# DMM (isotropic)
 fdup dmm --flowacc flowacc.tif -o flowdir_coarse.tif -k 4
+
+# DMM anisotropic: kx=4 columns, ky=2 rows
+fdup dmm --flowacc flowacc.tif -o flowdir_coarse.tif -k 4 2
 
 # NSA
 fdup nsa --flowacc flowacc.tif -o flowdir_coarse.tif -k 4
+fdup nsa --flowacc flowacc.tif -o flowdir_coarse.tif -k 4 2
 
 # COTAT
 fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o flowdir_coarse.tif -k 4 \
+     --area-threshold 10
+
+# COTAT anisotropic
+fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o flowdir_coarse.tif -k 4 2 \
      --area-threshold 10
 
 # COTAT+ (enable MUFP outlet selection; threshold in metres)

@@ -3,6 +3,7 @@
 Usage examples::
 
     fdup dmm   --flowacc flowacc.tif -o out.tif -k 4
+    fdup dmm   --flowacc flowacc.tif -o out.tif -k 4 2
     fdup nsa   --flowacc flowacc.tif -o out.tif -k 8
     fdup cotat --flowdir fdir.tif --flowacc facc.tif -o out.tif -k 4
     fdup d8    --dem dem.tif -o flowdir.tif
@@ -220,6 +221,23 @@ _CLI_GRID_TYPES: dict[str, GridType] = {
 }
 
 
+def _parse_k(values: list[int]) -> int | tuple[int, int]:
+    """Build the upscaler ``k`` argument from ``-k`` nargs.
+
+    One integer stays an int (isotropic public API). Two integers become
+    ``(kx, ky)`` with *kx* = columns / ``transform.a`` and *ky* = rows /
+    ``transform.e``. Any other length is rejected.
+    """
+    n = len(values)
+    if n == 1:
+        return values[0]
+    if n == 2:
+        return values[0], values[1]
+    raise ValueError(
+        f"-k takes 1 integer (isotropic) or 2 integers kx ky, got {n}"
+    )
+
+
 def _parse_grid_type(s: str) -> GridType:
     key = s.lower()
     if key not in _CLI_GRID_TYPES:
@@ -316,7 +334,18 @@ def main(argv=None):
     upscaler_parent.add_argument(
         "-o", "--output", required=True, help="Output flow direction raster path"
     )
-    upscaler_parent.add_argument("-k", type=int, required=True, help="Scaling factor")
+    upscaler_parent.add_argument(
+        "-k",
+        type=int,
+        nargs="+",
+        required=True,
+        metavar=("KX", "KY"),
+        help=(
+            "Scaling factor: one integer for isotropic cells, or two integers "
+            "kx ky for anisotropic cells (kx = columns / transform.a, "
+            "ky = rows / transform.e). Examples: -k 4, -k 4 2"
+        ),
+    )
 
     # ------------------------------------------------------------------
     # dmm
@@ -665,6 +694,11 @@ def main(argv=None):
     # Dispatch
     # ------------------------------------------------------------------
     args = parser.parse_args(argv)
+    if hasattr(args, "k"):
+        try:
+            args.k = _parse_k(args.k)
+        except ValueError as exc:
+            parser.error(str(exc))
     args.func(args)
 
 

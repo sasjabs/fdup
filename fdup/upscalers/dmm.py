@@ -14,7 +14,7 @@ from fdup._core.d8 import (
     DECODE_DC, DECODE_DR, DIR_DCOL, DIR_DROW, ENCODE_DIR,
 )
 from fdup._core.types import Grid, GridType
-from fdup._core.validation import check_dtype, check_type
+from fdup._core.validation import check_dtype, check_type, normalize_k
 
 
 # =========================================================================
@@ -22,29 +22,35 @@ from fdup._core.validation import check_dtype, check_type
 # =========================================================================
 
 @njit(cache=True)
-def _nb_check_null(valid_mask, ci, cj, k, shift):
-    """True when A-grid cell (ci, cj) contains no valid fine-grid pixels."""
-    r0 = ci * k + shift
-    c0 = cj * k + shift
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+def _nb_check_null(valid_mask, ci, cj, kx, ky, shift_c, shift_r):
+    """True when A-grid cell (ci, cj) contains no valid fine-grid pixels.
+
+    The cell window is *ky* rows × *kx* cols starting at
+    ``(ci*ky + shift_r, cj*kx + shift_c)``.
+    """
+    r0 = ci * ky + shift_r
+    c0 = cj * kx + shift_c
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             if valid_mask[r, c]:
                 return False
     return True
 
 
 @njit(cache=True)
-def _nb_cell_max_flowacc(flowacc, valid_mask, ci, cj, k, shift):
+def _nb_cell_max_flowacc(flowacc, valid_mask, ci, cj, kx, ky, shift_c, shift_r):
     """Maximum flowacc value inside A-grid cell (ci, cj).
 
+    The cell window is *ky* rows × *kx* cols starting at
+    ``(ci*ky + shift_r, cj*kx + shift_c)``.
     Returns -inf when the cell contains no valid pixel.
     """
-    r0 = ci * k + shift
-    c0 = cj * k + shift
+    r0 = ci * ky + shift_r
+    c0 = cj * kx + shift_c
     found = False
     best = np.float64(0.0)
-    for r in range(r0, r0 + k):
-        for c in range(c0, c0 + k):
+    for r in range(r0, r0 + ky):
+        for c in range(c0, c0 + kx):
             if valid_mask[r, c]:
                 v = np.float64(flowacc[r, c])
                 if not found or v > best:
@@ -54,29 +60,29 @@ def _nb_cell_max_flowacc(flowacc, valid_mask, ci, cj, k, shift):
 
 
 @njit(cache=True)
-def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, k, d, nrows, ncols):
+def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, kx, ky, dr, dc, nrows, ncols):
     """Return the global (r, c) of the highest-flowacc pixel inside cell
-    (ci, cj) accessed with offset *d*.
+    (ci, cj) accessed with row/column offsets *dr* / *dc*.
 
     Tie-break: smallest squared Euclidean distance to cell centre, then
     min local row, then min local col.
     Returns (-1, -1) when no valid pixel exists.
     """
-    r0 = ci * k + d
-    c0 = cj * k + d
-    rb = r0 + k if r0 + k <= nrows else nrows
-    cb = c0 + k if c0 + k <= ncols else ncols
+    r0 = ci * ky + dr
+    c0 = cj * kx + dc
+    rb = r0 + ky if r0 + ky <= nrows else nrows
+    cb = c0 + kx if c0 + kx <= ncols else ncols
     if r0 < 0 or c0 < 0 or r0 >= rb or c0 >= cb:
         return -1, -1
 
-    center_r = (k - 1) * 0.5
-    center_c = (k - 1) * 0.5
+    center_r = (ky - 1) * 0.5
+    center_c = (kx - 1) * 0.5
 
     found      = False
     best_val   = np.float64(0.0)
     best_dist2 = np.inf
-    best_lr    = k + 1
-    best_lc    = k + 1
+    best_lr    = ky + 1
+    best_lc    = kx + 1
     best_r     = -1
     best_c     = -1
 
@@ -114,7 +120,7 @@ def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, k, d, nrows, ncols):
 
 
 @njit(cache=True)
-def _nb_receiver(cells, ci, cj, mrows, mcols, valid_mask, k, shift,
+def _nb_receiver(cells, ci, cj, mrows, mcols, valid_mask, kx, ky, shift_c, shift_r,
                  decode_dr, decode_dc):
     """Follow direction stored in cells[ci, cj] to the receiver cell.
 
@@ -131,7 +137,7 @@ def _nb_receiver(cells, ci, cj, mrows, mcols, valid_mask, k, shift,
     nj = cj + dc
     if ni < 0 or ni >= mrows or nj < 0 or nj >= mcols:
         return -1, -1
-    if _nb_check_null(valid_mask, ni, nj, k, shift):
+    if _nb_check_null(valid_mask, ni, nj, kx, ky, shift_c, shift_r):
         return -1, -1
     return ni, nj
 
@@ -141,12 +147,14 @@ def _nb_receiver(cells, ci, cj, mrows, mcols, valid_mask, k, shift,
 # =========================================================================
 
 @njit(cache=True, parallel=True)
-def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcols,
-                                dir_drow, dir_dcol, encode_dir):
+def _nb_assign_cell_directions(flowacc, valid_mask, cells, kx, ky, shift_c, shift_r,
+                                mrows, mcols, dir_drow, dir_dcol, encode_dir):
     """Assign a D8 flow direction to every coarse A-grid cell.
 
     Rows are processed in parallel (prange); each row writes only to its own
     slice of cells[i, :] and reads flowacc / valid_mask read-only.
+    Fine pixels map to B-grid cells as ``(pi // ky, pj // kx)``; the
+    discharge cell is ``((dpi - shift_r) // ky, (dpj - shift_c) // kx)``.
     """
     nrows = flowacc.shape[0]
     ncols = flowacc.shape[1]
@@ -154,7 +162,7 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcol
     for i in prange(mrows):
         for j in range(mcols):
 
-            if _nb_check_null(valid_mask, i, j, k, shift):
+            if _nb_check_null(valid_mask, i, j, kx, ky, shift_c, shift_r):
                 cells[i, j] = np.uint8(255)
                 continue
 
@@ -162,20 +170,22 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcol
             discharge_j = j
 
             pi, pj = _nb_find_max_pixel(
-                flowacc, valid_mask, i, j, k, shift, nrows, ncols
+                flowacc, valid_mask, i, j, kx, ky, shift_r, shift_c, nrows, ncols
             )
             if pi >= 0:
-                bi = pi // k
-                bj = pj // k
+                bi = pi // ky
+                bj = pj // kx
 
                 dpi, dpj = _nb_find_max_pixel(
-                    flowacc, valid_mask, bi, bj, k, 0, nrows, ncols
+                    flowacc, valid_mask, bi, bj, kx, ky, 0, 0, nrows, ncols
                 )
                 if dpi >= 0:
-                    discharge_i = (dpi - shift) // k
-                    discharge_j = (dpj - shift) // k
+                    discharge_i = (dpi - shift_r) // ky
+                    discharge_j = (dpj - shift_c) // kx
 
-            current_max = _nb_cell_max_flowacc(flowacc, valid_mask, i, j, k, shift)
+            current_max = _nb_cell_max_flowacc(
+                flowacc, valid_mask, i, j, kx, ky, shift_c, shift_r
+            )
 
             if discharge_i == i and discharge_j == j:
                 best_max = current_max
@@ -186,9 +196,11 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcol
                     nj = j + dir_dcol[d_idx]
                     if ni < 0 or ni >= mrows or nj < 0 or nj >= mcols:
                         continue
-                    if _nb_check_null(valid_mask, ni, nj, k, shift):
+                    if _nb_check_null(valid_mask, ni, nj, kx, ky, shift_c, shift_r):
                         continue
-                    nbr = _nb_cell_max_flowacc(flowacc, valid_mask, ni, nj, k, shift)
+                    nbr = _nb_cell_max_flowacc(
+                        flowacc, valid_mask, ni, nj, kx, ky, shift_c, shift_r
+                    )
                     if nbr > best_max:
                         best_max = nbr
                         best_i   = ni
@@ -203,7 +215,8 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcol
                     discharge_j = j
                 else:
                     recv_max = _nb_cell_max_flowacc(
-                        flowacc, valid_mask, discharge_i, discharge_j, k, shift
+                        flowacc, valid_mask, discharge_i, discharge_j,
+                        kx, ky, shift_c, shift_r
                     )
                     if recv_max <= current_max:
                         discharge_i = i
@@ -214,29 +227,36 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcol
 
 
 @njit(cache=True)
-def _nb_fix_counter_flows(cells, flowacc, valid_mask, k, shift, mrows, mcols):
+def _nb_fix_counter_flows(cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                           mrows, mcols):
     """Resolve mutual head-to-head flow pairs."""
     SINK = np.uint8(0)
     for i in range(mrows - 1):
         for j in range(mcols - 1):
 
             if cells[i, j] == np.uint8(1) and cells[i, j + 1] == np.uint8(16):
-                if (_nb_cell_max_flowacc(flowacc, valid_mask, i, j,     k, shift) >
-                        _nb_cell_max_flowacc(flowacc, valid_mask, i, j + 1, k, shift)):
+                if (_nb_cell_max_flowacc(flowacc, valid_mask, i, j,
+                                          kx, ky, shift_c, shift_r) >
+                        _nb_cell_max_flowacc(flowacc, valid_mask, i, j + 1,
+                                              kx, ky, shift_c, shift_r)):
                     cells[i, j]     = SINK
                 else:
                     cells[i, j + 1] = SINK
 
             if cells[i, j] == np.uint8(4) and cells[i + 1, j] == np.uint8(64):
-                if (_nb_cell_max_flowacc(flowacc, valid_mask, i,     j, k, shift) >
-                        _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j, k, shift)):
+                if (_nb_cell_max_flowacc(flowacc, valid_mask, i, j,
+                                          kx, ky, shift_c, shift_r) >
+                        _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j,
+                                              kx, ky, shift_c, shift_r)):
                     cells[i, j]     = SINK
                 else:
                     cells[i + 1, j] = SINK
 
             if cells[i, j] == np.uint8(2) and cells[i + 1, j + 1] == np.uint8(32):
-                if (_nb_cell_max_flowacc(flowacc, valid_mask, i,     j,     k, shift) >
-                        _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j + 1, k, shift)):
+                if (_nb_cell_max_flowacc(flowacc, valid_mask, i, j,
+                                          kx, ky, shift_c, shift_r) >
+                        _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j + 1,
+                                              kx, ky, shift_c, shift_r)):
                     cells[i, j]         = SINK
                 else:
                     cells[i + 1, j + 1] = SINK
@@ -244,24 +264,32 @@ def _nb_fix_counter_flows(cells, flowacc, valid_mask, k, shift, mrows, mcols):
             if (i >= 1
                     and cells[i, j]         == np.uint8(128)
                     and cells[i - 1, j + 1] == np.uint8(8)):
-                if (_nb_cell_max_flowacc(flowacc, valid_mask, i,     j,     k, shift) >
-                        _nb_cell_max_flowacc(flowacc, valid_mask, i - 1, j + 1, k, shift)):
+                if (_nb_cell_max_flowacc(flowacc, valid_mask, i, j,
+                                          kx, ky, shift_c, shift_r) >
+                        _nb_cell_max_flowacc(flowacc, valid_mask, i - 1, j + 1,
+                                              kx, ky, shift_c, shift_r)):
                     cells[i, j]         = SINK
                 else:
                     cells[i - 1, j + 1] = SINK
 
 
 @njit(cache=True)
-def _nb_fix_intersections(cells, flowacc, valid_mask, k, shift, mrows, mcols,
-                           max_passes):
+def _nb_fix_intersections(cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                           mrows, mcols, max_passes):
     """Iteratively resolve crossing diagonal flows and local 2x2 conflicts."""
     for _ in range(max_passes):
         changed = False
         for i in range(mrows - 1):
             for j in range(mcols - 1):
-                tl = _nb_cell_max_flowacc(flowacc, valid_mask, i,     j,     k, shift)
-                tr = _nb_cell_max_flowacc(flowacc, valid_mask, i,     j + 1, k, shift)
-                bl = _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j,     k, shift)
+                tl = _nb_cell_max_flowacc(
+                    flowacc, valid_mask, i, j, kx, ky, shift_c, shift_r
+                )
+                tr = _nb_cell_max_flowacc(
+                    flowacc, valid_mask, i, j + 1, kx, ky, shift_c, shift_r
+                )
+                bl = _nb_cell_max_flowacc(
+                    flowacc, valid_mask, i + 1, j, kx, ky, shift_c, shift_r
+                )
 
                 if cells[i, j] == np.uint8(2) and cells[i, j + 1] == np.uint8(8):
                     if tl > tr:
@@ -288,7 +316,9 @@ def _nb_fix_intersections(cells, flowacc, valid_mask, k, shift, mrows, mcols,
 
                 if (cells[i,     j] == np.uint8(2)
                         and cells[i + 1, j] == np.uint8(128)):
-                    br = _nb_cell_max_flowacc(flowacc, valid_mask, i + 1, j + 1, k, shift)
+                    br = _nb_cell_max_flowacc(
+                        flowacc, valid_mask, i + 1, j + 1, kx, ky, shift_c, shift_r
+                    )
                     if tr > br:
                         cells[i,     j] = np.uint8(1)
                     else:
@@ -300,8 +330,8 @@ def _nb_fix_intersections(cells, flowacc, valid_mask, k, shift, mrows, mcols,
 
 
 @njit(cache=True)
-def _nb_fix_small_cycles(cells, flowacc, valid_mask, k, shift, mrows, mcols,
-                          max_passes, decode_dr, decode_dc):
+def _nb_fix_small_cycles(cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                          mrows, mcols, max_passes, decode_dr, decode_dc):
     """Break small cycles confined within a 2x2 coarse neighbourhood.
 
     The cell with the lowest max flowacc in the cycle is converted to a sink.
@@ -345,7 +375,8 @@ def _nb_fix_small_cycles(cells, flowacc, valid_mask, k, shift, mrows, mcols,
                                 for p in range(cyc_start, path_len):
                                     acc = _nb_cell_max_flowacc(
                                         flowacc, valid_mask,
-                                        path_r[p], path_c[p], k, shift
+                                        path_r[p], path_c[p],
+                                        kx, ky, shift_c, shift_r
                                     )
                                     if acc < w_acc:
                                         w_acc = acc
@@ -364,7 +395,8 @@ def _nb_fix_small_cycles(cells, flowacc, valid_mask, k, shift, mrows, mcols,
                     path_len += 1
 
                     ni, nj = _nb_receiver(
-                        cells, cur_i, cur_j, mrows, mcols, valid_mask, k, shift,
+                        cells, cur_i, cur_j, mrows, mcols, valid_mask,
+                        kx, ky, shift_c, shift_r,
                         decode_dr, decode_dc
                     )
                     if ni < 0:
@@ -377,11 +409,11 @@ def _nb_fix_small_cycles(cells, flowacc, valid_mask, k, shift, mrows, mcols,
 
 
 @njit(cache=True)
-def _nb_enforce_nodata(cells, valid_mask, k, shift, mrows, mcols):
+def _nb_enforce_nodata(cells, valid_mask, kx, ky, shift_c, shift_r, mrows, mcols):
     """Set every cell that contains no valid fine-grid pixel to nodata (255)."""
     for i in range(mrows):
         for j in range(mcols):
-            if _nb_check_null(valid_mask, i, j, k, shift):
+            if _nb_check_null(valid_mask, i, j, kx, ky, shift_c, shift_r):
                 cells[i, j] = np.uint8(255)
 
 
@@ -391,13 +423,15 @@ def _nb_enforce_nodata(cells, valid_mask, k, shift, mrows, mcols):
 
 def _warmup(dtype=np.float64):
     """Force ahead-of-time compilation of every JIT kernel for *dtype*."""
-    k     = 2
-    shift = 1
-    n     = k * 2 + 2 * shift
-    mrows = mcols = n // k - 1
+    kx = ky = 2
+    shift_c = shift_r = 1
+    nrows = ky * 2 + 2 * shift_r
+    ncols = kx * 2 + 2 * shift_c
+    mrows = nrows // ky - 1
+    mcols = ncols // kx - 1
 
-    flowacc    = np.arange(n * n, dtype=dtype).reshape(n, n)
-    valid_mask = np.ones((n, n), dtype=np.bool_)
+    flowacc    = np.arange(nrows * ncols, dtype=dtype).reshape(nrows, ncols)
+    valid_mask = np.ones((nrows, ncols), dtype=np.bool_)
     valid_mask[0, :]  = False
     valid_mask[-1, :] = False
     valid_mask[:, 0]  = False
@@ -405,13 +439,16 @@ def _warmup(dtype=np.float64):
 
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
 
-    _nb_assign_cell_directions(flowacc, valid_mask, cells, k, shift, mrows, mcols,
-                               DIR_DROW, DIR_DCOL, ENCODE_DIR)
-    _nb_fix_counter_flows     (cells, flowacc, valid_mask, k, shift, mrows, mcols)
-    _nb_fix_intersections     (cells, flowacc, valid_mask, k, shift, mrows, mcols, 1)
-    _nb_fix_small_cycles      (cells, flowacc, valid_mask, k, shift, mrows, mcols, 1,
-                               DECODE_DR, DECODE_DC)
-    _nb_enforce_nodata        (cells, valid_mask, k, shift, mrows, mcols)
+    _nb_assign_cell_directions(flowacc, valid_mask, cells, kx, ky, shift_c, shift_r,
+                               mrows, mcols, DIR_DROW, DIR_DCOL, ENCODE_DIR)
+    _nb_fix_counter_flows     (cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                               mrows, mcols)
+    _nb_fix_intersections     (cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                               mrows, mcols, 1)
+    _nb_fix_small_cycles      (cells, flowacc, valid_mask, kx, ky, shift_c, shift_r,
+                               mrows, mcols, 1, DECODE_DR, DECODE_DC)
+    _nb_enforce_nodata        (cells, valid_mask, kx, ky, shift_c, shift_r,
+                               mrows, mcols)
 
 
 # =========================================================================
@@ -421,7 +458,7 @@ def _warmup(dtype=np.float64):
 _FLOWACC_DTYPES = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float64)
 
 
-def DMM(flowacc: Grid, k: int) -> Grid:
+def DMM(flowacc: Grid, k: int | tuple[int, int]) -> Grid:
     """Double Maximum Method flow direction upscaler (Olivera et al. 2002).
 
     Parameters
@@ -430,20 +467,24 @@ def DMM(flowacc: Grid, k: int) -> Grid:
         Fine-grid flow-accumulation raster.  Must be ``GridType.FlowAcc`` with
         a supported dtype (int32/uint32/int64/uint64/float32/float64).
     k:
-        Upscaling factor.  Must be a positive **even** integer (the A/B-grid
-        half-cell shift requires an even k).
+        Upscaling factor.  A positive **even** integer (isotropic; equivalent
+        to ``(k, k)``) or a length-2 ``(kx, ky)`` tuple of positive **even**
+        integers.  *kx* is the X-axis / column scale (``transform.a``); *ky*
+        is the Y-axis / row scale (``transform.e``).  Both axes must be even
+        because the A/B-grid half-cell shift is ``kx // 2`` / ``ky // 2``.
+        A coarse cell covers a fine window of ``ky`` rows by ``kx`` columns.
 
     Returns
     -------
     Grid
         Coarse flow-direction grid (``GridType.FlowDir``, uint8).  Shape is
-        ``(H // k, W // k)`` and the pixel size is ``k`` times the fine-grid
-        pixel size.
+        ``(H // ky, W // kx)`` (floor division; leftover fine rows/columns
+        that are not a multiple of *ky*/*kx* are dropped).  The output
+        transform is ``Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)``.
     """
     check_type(flowacc, GridType.FlowAcc)
     check_dtype(flowacc, allowed=_FLOWACC_DTYPES)
-    if not isinstance(k, int) or k <= 0 or k % 2 != 0:
-        raise ValueError("DMM requires even k")
+    kx, ky = normalize_k(k, even=True)
 
     ndv = flowacc.meta.nodata
     if ndv is None:
@@ -456,40 +497,47 @@ def DMM(flowacc: Grid, k: int) -> Grid:
         pad_val = ndv
         nodata_mask = flowacc.array == ndv
 
-    # Apply the A/B-grid half-cell shift: pad by k//2 on all four sides.
-    # This is an algorithmic requirement of DMM, not a multiple-of-k pad.
-    shift = k // 2
+    # Apply the A/B-grid half-cell shift: pad by ky//2 on rows and kx//2
+    # on columns.  This is an algorithmic requirement of DMM, not a
+    # multiple-of-k pad.
+    shift_r = ky // 2
+    shift_c = kx // 2
     fa_shifted = np.pad(
         flowacc.array,
-        ((shift, shift), (shift, shift)),
+        ((shift_r, shift_r), (shift_c, shift_c)),
         mode="constant",
         constant_values=pad_val,
     )
     valid_shifted = np.pad(
         (~nodata_mask).astype(np.uint8),
-        ((shift, shift), (shift, shift)),
+        ((shift_r, shift_r), (shift_c, shift_c)),
         mode="constant",
         constant_values=0,
     ).astype(bool)
 
     nrows, ncols = fa_shifted.shape
-    mrows = nrows // k - 1   # == flowacc.shape[0] // k
-    mcols = ncols // k - 1   # == flowacc.shape[1] // k
+    mrows = nrows // ky - 1   # == flowacc.shape[0] // ky
+    mcols = ncols // kx - 1   # == flowacc.shape[1] // kx
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
 
     fa_shifted    = np.ascontiguousarray(fa_shifted)
     valid_shifted = np.ascontiguousarray(valid_shifted)
 
-    _nb_assign_cell_directions(fa_shifted, valid_shifted, cells, k, shift,
-                               mrows, mcols, DIR_DROW, DIR_DCOL, ENCODE_DIR)
-    _nb_fix_counter_flows(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols)
-    _nb_fix_intersections(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols, 4)
-    _nb_fix_small_cycles(cells, fa_shifted, valid_shifted, k, shift, mrows, mcols, 4,
+    _nb_assign_cell_directions(fa_shifted, valid_shifted, cells, kx, ky,
+                               shift_c, shift_r, mrows, mcols,
+                               DIR_DROW, DIR_DCOL, ENCODE_DIR)
+    _nb_fix_counter_flows(cells, fa_shifted, valid_shifted, kx, ky,
+                          shift_c, shift_r, mrows, mcols)
+    _nb_fix_intersections(cells, fa_shifted, valid_shifted, kx, ky,
+                          shift_c, shift_r, mrows, mcols, 4)
+    _nb_fix_small_cycles(cells, fa_shifted, valid_shifted, kx, ky,
+                         shift_c, shift_r, mrows, mcols, 4,
                          DECODE_DR, DECODE_DC)
-    _nb_enforce_nodata(cells, valid_shifted, k, shift, mrows, mcols)
+    _nb_enforce_nodata(cells, valid_shifted, kx, ky, shift_c, shift_r,
+                       mrows, mcols)
 
     t = flowacc.meta.transform
-    out_transform = Affine(t.a * k, t.b, t.c, t.d, t.e * k, t.f)
+    out_transform = Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)
 
     return Grid.create(
         array=cells,
