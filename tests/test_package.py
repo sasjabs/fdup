@@ -29,11 +29,16 @@ def test_submodule_imports():
     assert callable(fdup.utils.mask_area)
     assert callable(fdup.utils.match_grids)
     assert callable(fdup.utils.river_tree)
+    assert callable(fdup.utils.accur_bins)
     assert callable(fdup.evals.compare_watersheds)
     assert callable(fdup.evals.compare_flowdir)
     assert callable(fdup.evals.huac)
     assert callable(fdup.evals.flowdir_windrose)
     assert callable(fdup.evals.windrose_emd)
+    assert callable(fdup.plots.upscaled_map)
+    assert callable(fdup.plots.accurs_plot)
+    assert callable(fdup.plots.huac_scatterplot)
+    assert callable(fdup.plots.windrose_plot)
 
 
 def test_warmup_runs():

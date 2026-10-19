@@ -1,3 +1,4 @@
+from fdup.utils.accur_bins import accur_bins
 from fdup.utils.d8 import d8
 from fdup.utils.flowacc import flow_accumulation
 from fdup.utils.masking import (
@@ -35,4 +36,5 @@ __all__ = [
     "vectorize_network",
     "vectorize_tree",
     "vectorize_watershed",
+    "accur_bins",
 ]

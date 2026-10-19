@@ -1,6 +1,6 @@
 """fdup — flow direction upscaling, evaluation, and utilities."""
 
-from fdup import _core, io, upscalers, utils, evals
+from fdup import _core, io, upscalers, utils, evals, plots
 from fdup._core import Grid, GridMeta, GridType, warmup
 
 __all__ = [
@@ -9,6 +9,7 @@ __all__ = [
     "upscalers",
     "utils",
     "evals",
+    "plots",
     "Grid",
     "GridMeta",
     "GridType",

@@ -26,7 +26,7 @@ cd fdup
 pip install -e .[dev]
 ```
 
-Requirements: Python `>=3.10`, `numpy`, `numba`, `rasterio`, `pandas`, `affine`, `geopandas>=0.14`, `shapely>=2.0`.
+Requirements: Python `>=3.10`, `numpy`, `numba`, `rasterio`, `pandas`, `affine`, `geopandas>=0.14`, `shapely>=2.0`, `matplotlib>=3.7`, `contextily>=1.5`, `matplotlib-scalebar>=0.8`.
 
 ---
 
@@ -47,7 +47,7 @@ fdup.io.write(fd_coarse, "flowdir_coarse.tif", overwrite=True)
 ```
 
 `k` is a positive integer (isotropic, equivalent to `(k, k)`) or a `(kx, ky)` tuple:
-**`kx` is columns / `transform.a`; `ky` is rows / `transform.e`.**
+`kx` **is columns /** `transform.a`**;** `ky` **is rows /** `transform.e`**.**
 A coarse cell covers `ky` fine rows by `kx` fine columns, and the output
 transform is `Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)`.
 DMM requires both `kx` and `ky` to be even.
@@ -76,11 +76,11 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 ### `fdup.upscalers`
 
 
-| Function                                              | Description                                                                                          |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Function                                              | Description                                                                                         |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `DMM(flowacc, k)`                                     | Double Maximum Method. `k` is an even int or `(kx, ky)` with both even. Returns `GridType.FlowDir`. |
-| `NSA(flowacc, k)`                                     | Network Scaling Algorithm. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                  |
-| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                             |
+| `NSA(flowacc, k)`                                     | Network Scaling Algorithm. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                 |
+| `COTAT(flowdir, flowacc, k, *, area_threshold, mufp)` | COTAT / COTAT+. `k` is an int or `(kx, ky)`. Returns `GridType.FlowDir`.                            |
 
 
 
@@ -88,24 +88,25 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 ### `fdup.utils`
 
 
-| Function                                                                   | Description                                                                                                           |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `d8(dem, spherical=True)`                                                  | Compute ESRI D8 flow directions from a DEM.                                                                           |
-| `flow_accumulation(flowdir, *, area=True)`                                 | Compute upstream flow accumulation (area in km² for geographic CRS, CRS units² for projected CRS, or raw cell count). |
-| `strahler_order(flowdir)`                                                  | Compute Strahler stream orders via BFS. Returns `GridType.Strahler` (uint8; 0 = nodata/sink).                         |
-| `snap_pour_cell(flowacc, x, y, radius)`                                    | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`.                        |
-| `delineate_watershed(flowdir, pour_row, pour_col)`                         | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                                                   |
-| `disaggregate_mask(mask, k)`                                               | Expand a coarse mask by `k` (int or `(kx, ky)`; nearest-neighbour).                                                   |
-| `match_grids(reference, other)`                                            | Crop/pad `other` to the same extent as `reference`.                                                                   |
-| `mask_area(mask)`                                                          | Total area of True-valued cells: km² for geographic CRS, CRS units² for projected CRS.                                |
-| `threshold_mask(grid, cutoff)`                                             | Boolean mask where `value >= cutoff`; nodata/NaN cells → False. Accepts `FlowAcc` or `Strahler`.                      |
-| `mask_grid(grid, mask)`                                                    | Set nodata on `grid` wherever `mask` is False. Returns a new Grid of the same type.                                   |
-| `crop_grid(grid)`                                                          | Trim `grid` to the minimal bounding box of data cells; raises `ValueError` for all-nodata grids.                      |
-| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)`                 | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates.                                |
-| `mask_seeds(seeds, flowdir, flowacc, mask)`                                | Prune a seeds array to mask-intersecting sub-segments; returns a new structured array with recomputed lengths.        |
-| `vectorize_network(flowdir, flowacc=None)`                                 | Decompose D8 grid into river-segment LineStrings (GeoDataFrame). Requires `geopandas` and `shapely`.                  |
-| `vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)` | Trace each seed from headwater to mouth and return one LineString per seed (GeoDataFrame).                            |
-| `vectorize_watershed(mask)`                                                | Convert a boolean Mask grid to a MultiPolygon covering True cells exactly (cell corners).                             |
+| Function                                                                   | Description                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `d8(dem, spherical=True)`                                                  | Compute ESRI D8 flow directions from a DEM.                                                                                                                                   |
+| `flow_accumulation(flowdir, *, area=True)`                                 | Compute upstream flow accumulation (area in km² for geographic CRS, CRS units² for projected CRS, or raw cell count).                                                         |
+| `strahler_order(flowdir)`                                                  | Compute Strahler stream orders via BFS. Returns `GridType.Strahler` (uint8; 0 = nodata/sink).                                                                                 |
+| `snap_pour_cell(flowacc, x, y, radius)`                                    | Snap a pour point to the highest flow-accumulation cell within `radius`. Returns `(row, col)`.                                                                                |
+| `delineate_watershed(flowdir, pour_row, pour_col)`                         | BFS upstream delineation from a pour cell. Returns `GridType.Mask`.                                                                                                           |
+| `disaggregate_mask(mask, k)`                                               | Expand a coarse mask by `k` (int or `(kx, ky)`; nearest-neighbour).                                                                                                           |
+| `match_grids(reference, other)`                                            | Crop/pad `other` to the same extent as `reference`.                                                                                                                           |
+| `mask_area(mask)`                                                          | Total area of True-valued cells: km² for geographic CRS, CRS units² for projected CRS.                                                                                        |
+| `threshold_mask(grid, cutoff)`                                             | Boolean mask where `value >= cutoff`; nodata/NaN cells → False. Accepts `FlowAcc` or `Strahler`.                                                                              |
+| `mask_grid(grid, mask)`                                                    | Set nodata on `grid` wherever `mask` is False. Returns a new Grid of the same type.                                                                                           |
+| `crop_grid(grid)`                                                          | Trim `grid` to the minimal bounding box of data cells; raises `ValueError` for all-nodata grids.                                                                              |
+| `river_tree(flowdir, flowacc, *, mask, min_upstream_area)`                 | Extract the river network as a `GridType.Tree` grid plus an array of seed coordinates. Based on T. Samsonov's [fdcomp](https://github.com/tsamsonov/fdcomp)                   |
+| `mask_seeds(seeds, flowdir, flowacc, mask)`                                | Prune a seeds array to mask-intersecting sub-segments; returns a new structured array with recomputed lengths.                                                                |
+| `vectorize_network(flowdir, flowacc=None)`                                 | Decompose D8 grid into river-segment LineStrings (GeoDataFrame). Requires `geopandas` and `shapely`.                                                                          |
+| `vectorize_tree(seeds, flowdir, *, cutoff=None, rank=None, accuracy=None)` | Trace each seed from headwater to mouth and return one LineString per seed (GeoDataFrame).                                                                                    |
+| `vectorize_watershed(mask)`                                                | Convert a boolean Mask grid to a MultiPolygon covering True cells exactly (cell corners).                                                                                     |
+| `accur_bins(accurs, seeds, cumulative=True, bins=None)`                    | Flow-accumulation-weighted average of per-seed accuracy scores in log-spaced (or custom) bins of seeds ranked by `acc`. Returns `aggregated, (bins_absolute, bins_relative)`. |
 
 
 
@@ -113,13 +114,50 @@ See `examples/api_demo.py` for a fully self-contained pipeline that runs on a sy
 ### `fdup.evals`
 
 
-| Function                                                                                            | Description                                                                    |
-| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `compare_watersheds(mask1, mask2)`                                                                  | Squared Ochiai overlap index + intersection mask.                              |
-| `compare_flowdir(flowdir_fine, flowdir_coarse, seeds, *, alpha, shuffle, strict_upstream, cascade)` | Per-seed flow-direction accuracy scores.                                       |
-| `huac(flowacc_fine, flowdir_coarse, flowacc_coarse, x, y, radius, *, upstream_area_threshold)`      | Hiearchical upstream-area comparison: returns an error raster and a DataFrame. |
-| `flowdir_windrose(flowdir, mask)`                                                                   | Direction-frequency windrose for a flow direction grid.                        |
-| `windrose_emd(wr1, wr2)`                                                                            | Earth Mover's Distance between two windroses.                                  |
+| Function                                                                                            | Description                                                                                                   |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `compare_watersheds(mask1, mask2)`                                                                  | Squared Ochiai overlap index + intersection mask.                                                             |
+| `compare_flowdir(flowdir_fine, flowdir_coarse, seeds, *, alpha, shuffle, strict_upstream, cascade)` | Per-seed flow-direction accuracy scores. Based on T. Samsonov's [fdcomp](https://github.com/tsamsonov/fdcomp) |
+| `huac(flowacc_fine, flowdir_coarse, flowacc_coarse, x, y, radius, *, upstream_area_threshold)`      | Hiearchical upstream-area comparison: returns an error raster and a DataFrame.                                |
+| `flowdir_windrose(flowdir, mask)`                                                                   | Direction-frequency windrose for a flow direction grid.                                                       |
+| `windrose_emd(wr1, wr2)`                                                                            | Earth Mover's Distance between two windroses.                                                                 |
+
+
+
+
+### `fdup.plots`
+
+
+| Function                                                                                                 | Description                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `upscaled_map(upscaled_watershed, *, upscaled_network, reference_watershed, crs, basemap_provider, ...)` | Map of an upscaled watershed (fill), optional stream network, and optional reference outline, on an EPSG:3857 basemap. `basemap_provider=None` skips tiles.                                    |
+| `accurs_plot(accurs, bins, *, colors, legend_labels, ...)`                                               | Cumulative weighted-accuracy curves. X axis is log10. Default y label is "Weighted accuracy score".                                                                                            |
+| `huac_scatterplot(huac_table, *, color, point_size, stats, ...)`                                         | Log-log scatter of coarse vs fine upstream area from a HUAC table (`coarse_upstream_area`, `fine_max_upstream_area`, `relative_upstream_area_error`). Optional log10 OLS fit with R² and RMSE. |
+| `windrose_plot(windrose, *, add_ref, add_custom_ref, ...)`                                               | Polar bars of 8-bin flow-direction distributions in `COMPASS_ORDER` (E, SE, S, SW, W, NW, N, NE).                                                                                              |
+
+```python
+import fdup
+
+fdup.plots.upscaled_map(
+    watershed,                      # shapely geometry, GeoSeries, or GeoDataFrame
+    upscaled_network=network,       # optional GeoDataFrame
+    reference_watershed=reference,  # optional
+    crs="EPSG:4326",                # required for a shapely geometry with no CRS
+    basemap_provider="OSM",         # None skips the basemap
+    output="upscaled_map.png",
+)
+
+fdup.plots.accurs_plot(accurs, bins, output="accurs_plot.png")
+
+fdup.plots.huac_scatterplot(huac_table, output="huac_scatterplot.png")
+
+# distribution is the second return value of fdup.evals.flowdir_windrose
+fdup.plots.windrose_plot(
+    distribution,                   # shape (8,), sums to 1; or a list of those
+    add_ref="dist",                 # or "count"; None skips the reference arcs
+    output="windrose_plot.png",
+)
+```
 
 
 
@@ -186,7 +224,7 @@ fdup cotat --flowdir flowdir.tif --flowacc flowacc.tif -o flowdir_coarse.tif -k 
 ```bash
 # D8 flow directions from a DEM
 fdup d8 --dem dem.tif -o flowdir.tif
-
+ve
 # Flow accumulation
 fdup flowacc --flowdir flowdir.tif -o flowacc.tif          # area in km² / CRS units²
 fdup flowacc --flowdir flowdir.tif -o flowacc.tif --cells  # raw cell count
@@ -341,3 +379,9 @@ Flow direction grids use the [ESRI D8 encoding](https://pro.arcgis.com/en/pro-ap
 `1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE, 255=nodata`.
 
 Supported flow accumulation dtypes: `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`.
+
+## Acknowledgements
+
+Flow direction upscaling algorithms are implemented based on their descriptions in research papers: **DMM** - [Olivera et al., 2002](https://doi.org/10.1029/2001WR000726), **NSA** - [Fekete et al., 2001](https://doi.org/10.1029/2001WR900024), **COTAT / COTAT+** — [Reed, 2003](https://doi.org/10.1029/2003WR001989), [Paz et al., 2006](https://doi.org/10.1029/2005WR004544)
+
+Upscaled flow directions accuracy assessment is based on T. Samsonov's [fdcomp](https://github.com/tsamsonov/fdcomp) module. 
