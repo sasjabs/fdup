@@ -9,7 +9,7 @@ authors = [
     {name="Mikhail Uzhegov", email="uzhegovmv@my.msu.ru"}
 ]
 description = "Flow direction upscaling toolkit (DMM, NSA, COTAT)"
-readme = "Readme.md"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.21.3",
