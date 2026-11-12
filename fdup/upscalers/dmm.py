@@ -25,14 +25,24 @@ from fdup._core.validation import check_dtype, check_type, normalize_k
 def _nb_check_null(valid_mask, ci, cj, kx, ky, shift_c, shift_r):
     """True when A-grid cell (ci, cj) contains no valid fine-grid pixels.
 
-    The cell window is *ky* rows × *kx* cols starting at
-    ``(ci*ky + shift_r, cj*kx + shift_c)``.
+    The cell window is *ky* rows × *kx* cols of logical coordinates
+    starting at ``(ci*ky + shift_r, cj*kx + shift_c)``. Logical
+    ``(r, c)`` maps to raw ``(r - shift_r, c - shift_c)``; a coordinate
+    outside ``valid_mask`` is invalid (the former padded border).
     """
     r0 = ci * ky + shift_r
     c0 = cj * kx + shift_c
+    H = valid_mask.shape[0]
+    W = valid_mask.shape[1]
     for r in range(r0, r0 + ky):
         for c in range(c0, c0 + kx):
-            if valid_mask[r, c]:
+            if r < shift_r or c < shift_c:
+                continue
+            rr = r - shift_r
+            cc = c - shift_c
+            if rr >= H or cc >= W:
+                continue
+            if valid_mask[rr, cc]:
                 return False
     return True
 
@@ -41,18 +51,28 @@ def _nb_check_null(valid_mask, ci, cj, kx, ky, shift_c, shift_r):
 def _nb_cell_max_flowacc(flowacc, valid_mask, ci, cj, kx, ky, shift_c, shift_r):
     """Maximum flowacc value inside A-grid cell (ci, cj).
 
-    The cell window is *ky* rows × *kx* cols starting at
-    ``(ci*ky + shift_r, cj*kx + shift_c)``.
-    Returns -inf when the cell contains no valid pixel.
+    The cell window is *ky* rows × *kx* cols of logical coordinates
+    starting at ``(ci*ky + shift_r, cj*kx + shift_c)``. Logical
+    ``(r, c)`` maps to raw ``(r - shift_r, c - shift_c)``; a coordinate
+    outside the fine grid is invalid. Returns -inf when the cell
+    contains no valid pixel.
     """
     r0 = ci * ky + shift_r
     c0 = cj * kx + shift_c
+    H = flowacc.shape[0]
+    W = flowacc.shape[1]
     found = False
     best = np.float64(0.0)
     for r in range(r0, r0 + ky):
         for c in range(c0, c0 + kx):
-            if valid_mask[r, c]:
-                v = np.float64(flowacc[r, c])
+            if r < shift_r or c < shift_c:
+                continue
+            rr = r - shift_r
+            cc = c - shift_c
+            if rr >= H or cc >= W:
+                continue
+            if valid_mask[rr, cc]:
+                v = np.float64(flowacc[rr, cc])
                 if not found or v > best:
                     best = v
                     found = True
@@ -60,9 +80,15 @@ def _nb_cell_max_flowacc(flowacc, valid_mask, ci, cj, kx, ky, shift_c, shift_r):
 
 
 @njit(cache=True)
-def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, kx, ky, dr, dc, nrows, ncols):
-    """Return the global (r, c) of the highest-flowacc pixel inside cell
+def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, kx, ky, dr, dc, nrows, ncols,
+                       shift_r, shift_c):
+    """Return the logical (r, c) of the highest-flowacc pixel inside cell
     (ci, cj) accessed with row/column offsets *dr* / *dc*.
+
+    *nrows* / *ncols* are the logical dimensions (fine shape plus one
+    shift of border on each side). Logical ``(r, c)`` maps to raw
+    ``(r - shift_r, c - shift_c)``; out-of-range raw coordinates are
+    invalid. Returned coordinates stay in that logical frame.
 
     Tie-break: smallest squared Euclidean distance to cell centre, then
     min local row, then min local col.
@@ -75,6 +101,8 @@ def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, kx, ky, dr, dc, nrows, ncols
     if r0 < 0 or c0 < 0 or r0 >= rb or c0 >= cb:
         return -1, -1
 
+    H = flowacc.shape[0]
+    W = flowacc.shape[1]
     center_r = (ky - 1) * 0.5
     center_c = (kx - 1) * 0.5
 
@@ -88,9 +116,13 @@ def _nb_find_max_pixel(flowacc, valid_mask, ci, cj, kx, ky, dr, dc, nrows, ncols
 
     for r in range(r0, rb):
         for c in range(c0, cb):
-            if not valid_mask[r, c]:
+            if r < shift_r or c < shift_c:
                 continue
-            v  = np.float64(flowacc[r, c])
+            rr = r - shift_r
+            cc = c - shift_c
+            if rr >= H or cc >= W or not valid_mask[rr, cc]:
+                continue
+            v  = np.float64(flowacc[rr, cc])
             lr = r - r0
             lc = c - c0
             dist2 = (lr - center_r) ** 2 + (lc - center_c) ** 2
@@ -155,9 +187,12 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, kx, ky, shift_c, shif
     slice of cells[i, :] and reads flowacc / valid_mask read-only.
     Fine pixels map to B-grid cells as ``(pi // ky, pj // kx)``; the
     discharge cell is ``((dpi - shift_r) // ky, (dpj - shift_c) // kx)``.
+    ``pi`` and ``dpi`` are logical coordinates (raw index plus the shift).
     """
-    nrows = flowacc.shape[0]
-    ncols = flowacc.shape[1]
+    # Logical frame: the fine grid plus the A/B-grid shift on every side.
+    # Accessors subtract the shift; the arrays themselves are unpadded.
+    nrows = flowacc.shape[0] + 2 * shift_r
+    ncols = flowacc.shape[1] + 2 * shift_c
 
     for i in prange(mrows):
         for j in range(mcols):
@@ -170,14 +205,16 @@ def _nb_assign_cell_directions(flowacc, valid_mask, cells, kx, ky, shift_c, shif
             discharge_j = j
 
             pi, pj = _nb_find_max_pixel(
-                flowacc, valid_mask, i, j, kx, ky, shift_r, shift_c, nrows, ncols
+                flowacc, valid_mask, i, j, kx, ky, shift_r, shift_c, nrows, ncols,
+                shift_r, shift_c,
             )
             if pi >= 0:
                 bi = pi // ky
                 bj = pj // kx
 
                 dpi, dpj = _nb_find_max_pixel(
-                    flowacc, valid_mask, bi, bj, kx, ky, 0, 0, nrows, ncols
+                    flowacc, valid_mask, bi, bj, kx, ky, 0, 0, nrows, ncols,
+                    shift_r, shift_c,
                 )
                 if dpi >= 0:
                     discharge_i = (dpi - shift_r) // ky
@@ -422,20 +459,22 @@ def _nb_enforce_nodata(cells, valid_mask, kx, ky, shift_c, shift_r, mrows, mcols
 # =========================================================================
 
 def _warmup(dtype=np.float64):
-    """Force ahead-of-time compilation of every JIT kernel for *dtype*."""
+    """Force ahead-of-time compilation of every JIT kernel for *dtype*.
+
+    Arrays are the unpadded fine grid. Logical dimensions are that shape
+    plus the A/B-grid shift on each side, matching ``DMM``.
+    """
     kx = ky = 2
     shift_c = shift_r = 1
-    nrows = ky * 2 + 2 * shift_r
-    ncols = kx * 2 + 2 * shift_c
+    fine_rows = ky * 2
+    fine_cols = kx * 2
+    nrows = fine_rows + 2 * shift_r
+    ncols = fine_cols + 2 * shift_c
     mrows = nrows // ky - 1
     mcols = ncols // kx - 1
 
-    flowacc    = np.arange(nrows * ncols, dtype=dtype).reshape(nrows, ncols)
-    valid_mask = np.ones((nrows, ncols), dtype=np.bool_)
-    valid_mask[0, :]  = False
-    valid_mask[-1, :] = False
-    valid_mask[:, 0]  = False
-    valid_mask[:, -1] = False
+    flowacc    = np.arange(fine_rows * fine_cols, dtype=dtype).reshape(fine_rows, fine_cols)
+    valid_mask = np.ones((fine_rows, fine_cols), dtype=np.bool_)
 
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
 
@@ -487,53 +526,45 @@ def DMM(flowacc: Grid, k: int | tuple[int, int]) -> Grid:
     kx, ky = normalize_k(k, even=True)
 
     ndv = flowacc.meta.nodata
-    if ndv is None:
-        pad_val = 0
-        nodata_mask = np.zeros(flowacc.array.shape, dtype=bool)
-    elif isinstance(ndv, float) and np.isnan(ndv):
-        pad_val = 0
-        nodata_mask = np.isnan(flowacc.array)
-    else:
-        pad_val = ndv
-        nodata_mask = flowacc.array == ndv
+    fa = flowacc.array
 
-    # Apply the A/B-grid half-cell shift: pad by ky//2 on rows and kx//2
-    # on columns.  This is an algorithmic requirement of DMM, not a
-    # multiple-of-k pad.
+    # A/B-grid half-cell shift. Logical coordinates are the fine grid plus
+    # this many rows/cols of invalid border on each side. Accessors map
+    # logical (r, c) to raw (r - shift_r, c - shift_c) and treat
+    # out-of-range as invalid, so the border is not stored.
     shift_r = ky // 2
     shift_c = kx // 2
-    fa_shifted = np.pad(
-        flowacc.array,
-        ((shift_r, shift_r), (shift_c, shift_c)),
-        mode="constant",
-        constant_values=pad_val,
-    )
-    valid_shifted = np.pad(
-        (~nodata_mask).astype(np.uint8),
-        ((shift_r, shift_r), (shift_c, shift_c)),
-        mode="constant",
-        constant_values=0,
-    ).astype(bool)
 
-    nrows, ncols = fa_shifted.shape
-    mrows = nrows // ky - 1   # == flowacc.shape[0] // ky
-    mcols = ncols // kx - 1   # == flowacc.shape[1] // kx
+    # One unpadded bool per fine pixel. Fix passes call
+    # _nb_cell_max_flowacc heavily; testing nodata inline there would
+    # cost more than this mask.
+    valid_mask = np.empty(fa.shape, dtype=np.bool_)
+    if ndv is None:
+        valid_mask.fill(True)
+    elif isinstance(ndv, float) and np.isnan(ndv):
+        np.isnan(fa, out=valid_mask)
+        np.logical_not(valid_mask, out=valid_mask)
+    else:
+        np.not_equal(fa, ndv, out=valid_mask)
+
+    H, W = fa.shape
+    nrows = H + 2 * shift_r
+    ncols = W + 2 * shift_c
+    mrows = nrows // ky - 1   # == H // ky
+    mcols = ncols // kx - 1   # == W // kx
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
 
-    fa_shifted    = np.ascontiguousarray(fa_shifted)
-    valid_shifted = np.ascontiguousarray(valid_shifted)
-
-    _nb_assign_cell_directions(fa_shifted, valid_shifted, cells, kx, ky,
+    _nb_assign_cell_directions(fa, valid_mask, cells, kx, ky,
                                shift_c, shift_r, mrows, mcols,
                                DIR_DROW, DIR_DCOL, ENCODE_DIR)
-    _nb_fix_counter_flows(cells, fa_shifted, valid_shifted, kx, ky,
+    _nb_fix_counter_flows(cells, fa, valid_mask, kx, ky,
                           shift_c, shift_r, mrows, mcols)
-    _nb_fix_intersections(cells, fa_shifted, valid_shifted, kx, ky,
+    _nb_fix_intersections(cells, fa, valid_mask, kx, ky,
                           shift_c, shift_r, mrows, mcols, 4)
-    _nb_fix_small_cycles(cells, fa_shifted, valid_shifted, kx, ky,
+    _nb_fix_small_cycles(cells, fa, valid_mask, kx, ky,
                          shift_c, shift_r, mrows, mcols, 4,
                          DECODE_DR, DECODE_DC)
-    _nb_enforce_nodata(cells, valid_shifted, kx, ky, shift_c, shift_r,
+    _nb_enforce_nodata(cells, valid_mask, kx, ky, shift_c, shift_r,
                        mrows, mcols)
 
     t = flowacc.meta.transform

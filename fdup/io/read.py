@@ -12,6 +12,30 @@ from affine import Affine
 from fdup._core.types import Grid, GridType
 
 
+def _to_uint8_remap_nodata(
+    array: np.ndarray,
+    file_nodata: Union[int, float, None],
+    sentinel: int,
+) -> np.ndarray:
+    """Cast *array* to uint8 and replace *file_nodata* with *sentinel*.
+
+    The buffer from ``src.read`` is owned. When it is already uint8, nodata
+    is rewritten in place. A wider dtype is masked first: the cast can wrap
+    the file nodata onto a valid uint8 value.
+    """
+    sentinel_u8 = np.uint8(sentinel)
+    if array.dtype == np.uint8:
+        if file_nodata is not None and file_nodata != sentinel:
+            array[array == file_nodata] = sentinel_u8
+        return array
+
+    nodata_mask = (array == file_nodata) if file_nodata is not None else None
+    array = array.astype(np.uint8, copy=False)
+    if nodata_mask is not None:
+        array[nodata_mask] = sentinel_u8
+    return array
+
+
 def read(
     path: Union[str, Path],
     grid_type: GridType = GridType.FlowDir,
@@ -54,15 +78,13 @@ def read(
     # ------------------------------------------------------------------
 
     if grid_type == GridType.FlowDir:
-        nodata_mask = (array == file_nodata) if file_nodata is not None else None
-        array = array.astype(np.uint8)
-        if nodata_mask is not None:
-            array[nodata_mask] = np.uint8(255)
+        array = _to_uint8_remap_nodata(array, file_nodata, sentinel=255)
         nodata: Union[int, float, None] = 255
 
     elif grid_type == GridType.Mask:
+        # (array != 0) is already bool; a further astype(bool) would copy it.
         nodata_mask = (array == file_nodata) if file_nodata is not None else None
-        array = (array != 0).astype(np.bool_)
+        array = array != 0
         if nodata_mask is not None:
             array[nodata_mask] = False
         nodata = None
@@ -111,14 +133,11 @@ def read(
             nodata = file_nodata
 
     elif grid_type == GridType.Tree:
-        array = array.astype(np.uint32)
+        array = array.astype(np.uint32, copy=False)
         nodata = 0
 
     elif grid_type == GridType.Strahler:
-        nodata_mask = (array == file_nodata) if file_nodata is not None else None
-        array = array.astype(np.uint8)
-        if nodata_mask is not None:
-            array[nodata_mask] = np.uint8(0)
+        array = _to_uint8_remap_nodata(array, file_nodata, sentinel=0)
         nodata = 0
 
     else:

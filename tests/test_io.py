@@ -155,3 +155,65 @@ class TestMultiBandRejection:
 
         with pytest.raises(ValueError, match="single-band"):
             read(p, grid_type=GridType.FlowDir)
+
+
+def _write_raw(path, array: np.ndarray, nodata) -> None:
+    profile = {
+        "driver": "GTiff",
+        "count": 1,
+        "height": array.shape[0],
+        "width": array.shape[1],
+        "dtype": array.dtype.name,
+        "transform": TRANSFORM,
+        "crs": None,
+        "nodata": nodata,
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(array, 1)
+
+
+class TestReadNodataRemap:
+    """Nodata remap must happen before a narrowing cast wraps the sentinel."""
+
+    def test_flowdir_uint8_nodata_remapped_in_place(self, tmp_path):
+        src = np.array([[1, 0], [4, 255]], dtype=np.uint8)
+        p = tmp_path / "fd_u8.tif"
+        _write_raw(p, src, nodata=0)
+        g = read(p, grid_type=GridType.FlowDir)
+        np.testing.assert_array_equal(
+            g.array, np.array([[1, 255], [4, 255]], dtype=np.uint8)
+        )
+        assert g.meta.nodata == 255
+
+    def test_flowdir_int16_nodata_masked_before_cast(self, tmp_path):
+        # 256 wraps to 0 in uint8. A real sink (0) must stay 0; only the
+        # file-nodata pixel becomes the canonical sentinel 255.
+        src = np.array([[1, 256], [0, 4]], dtype=np.int16)
+        p = tmp_path / "fd_i16.tif"
+        _write_raw(p, src, nodata=256)
+        g = read(p, grid_type=GridType.FlowDir)
+        np.testing.assert_array_equal(
+            g.array, np.array([[1, 255], [0, 4]], dtype=np.uint8)
+        )
+
+    def test_strahler_int16_nodata_masked_before_cast(self, tmp_path):
+        # 257 wraps to 1. The valid order-1 cell must stay 1.
+        src = np.array([[1, 257], [2, 3]], dtype=np.int16)
+        p = tmp_path / "st_i16.tif"
+        _write_raw(p, src, nodata=257)
+        g = read(p, grid_type=GridType.Strahler)
+        np.testing.assert_array_equal(
+            g.array, np.array([[1, 0], [2, 3]], dtype=np.uint8)
+        )
+        assert g.meta.nodata == 0
+
+    def test_mask_nodata_cleared_without_extra_cast(self, tmp_path):
+        src = np.array([[0, 1], [255, 2]], dtype=np.uint8)
+        p = tmp_path / "mask.tif"
+        _write_raw(p, src, nodata=255)
+        g = read(p, grid_type=GridType.Mask)
+        np.testing.assert_array_equal(
+            g.array, np.array([[False, True], [False, True]])
+        )
+        assert g.array.dtype == np.bool_
+        assert g.meta.nodata is None

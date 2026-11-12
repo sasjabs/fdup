@@ -34,20 +34,43 @@ from fdup._core.validation import (
 # JIT kernels
 # =========================================================================
 
+@njit(cache=True, inline="always")
+def _fa(fa, r, c, ndv, has_ndv, ndv_is_nan):
+    """Flow accumulation at ``(r, c)`` as float64. Nodata reads as 0.
+
+    The sentinel test uses the raw array value: NaN by ``val != val``, any
+    other sentinel by ``val == ndv`` in *fa*'s dtype. *ndv* is ignored when
+    *has_ndv* is false; pass a zero of *fa*'s dtype in that case. Callers
+    only invoke this for coordinates inside the original raster.
+    """
+    val = fa[r, c]
+    if has_ndv:
+        if ndv_is_nan:
+            if val != val:
+                return np.float64(0.0)
+        elif val == ndv:
+            return np.float64(0.0)
+    return np.float64(val)
+
+
 @njit(cache=True)
-def _find_largest_in_cell(flowacc, i, j, kx, ky):
+def _find_largest_in_cell(flowacc, i, j, kx, ky, orig_nrows, orig_ncols,
+                          fa_ndv, fa_has_ndv, fa_ndv_is_nan):
     """Find pixel with largest flow accumulation in cell (i, j).
 
-    Cell (i, j) covers *ky* fine rows by *kx* fine columns.
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns. The scan stops
+    at the original raster edge. Nodata flow accumulation contributes 0.
     """
     r0 = i * ky
     c0 = j * kx
+    r1 = min(r0 + ky, orig_nrows)
+    c1 = min(c0 + kx, orig_ncols)
     best_r = r0
     best_c = c0
-    best_val = np.float64(flowacc[r0, c0])
-    for r in range(r0, r0 + ky):
-        for c in range(c0, c0 + kx):
-            v = np.float64(flowacc[r, c])
+    best_val = _fa(flowacc, r0, c0, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
+    for r in range(r0, r1):
+        for c in range(c0, c1):
+            v = _fa(flowacc, r, c, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
             if v > best_val:
                 best_val = v
                 best_r = r
@@ -71,22 +94,27 @@ def _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols, flowdir_ndv, has_ndv):
 
 @njit(cache=True)
 def _largest_valid_in_cell(flowdir, flowacc, i, j, kx, ky,
-                           orig_nrows, orig_ncols, flowdir_ndv, has_ndv):
-    """Largest-flowacc *valid* pixel of cell (i, j); ignores padded/nodata pixels.
+                           orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                           fa_ndv, fa_has_ndv, fa_ndv_is_nan):
+    """Largest-flowacc *valid* pixel of cell (i, j).
 
-    Cell (i, j) covers *ky* fine rows by *kx* fine columns.
+    Cell (i, j) covers *ky* fine rows by *kx* fine columns. Pixels outside
+    the original extent and flow-direction nodata are ignored. The scan
+    stops at the raster edge. Flow-accumulation nodata contributes 0.
     """
     r0 = i * ky
     c0 = j * kx
+    r1 = min(r0 + ky, orig_nrows)
+    c1 = min(c0 + kx, orig_ncols)
     best_r = r0
     best_c = c0
     best_val = -np.inf
-    for r in range(r0, r0 + ky):
-        for c in range(c0, c0 + kx):
+    for r in range(r0, r1):
+        for c in range(c0, c1):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
-            v = np.float64(flowacc[r, c])
+            v = _fa(flowacc, r, c, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
             if v > best_val:
                 best_val = v
                 best_r = r
@@ -97,6 +125,7 @@ def _largest_valid_in_cell(flowdir, flowacc, i, j, kx, ky,
 @njit(cache=True)
 def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, kx, ky,
                                 orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                                fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                                 row_dists,
                                 decode_dr, decode_dc, decode_valid,
                                 dir_drow, dir_dcol):
@@ -141,7 +170,7 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, kx, ky,
             # Does this neighbour flow into the current pixel?
             if (nr + np.intp(decode_dr[nfi]) == cur_r
                     and nc + np.intp(decode_dc[nfi]) == cur_c):
-                fa = np.float64(flowacc[nr, nc])
+                fa = _fa(flowacc, nr, nc, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
                 if fa > best_fa:
                     best_fa = fa
                     best_nr = nr
@@ -159,6 +188,7 @@ def _trace_upstream_within_cell(flowdir, flowacc, sr, sc, i, j, kx, ky,
 @njit(cache=True)
 def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
                            orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                           fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                            mufp, row_dists, decode_dr, decode_dc, decode_valid,
                            dir_drow, dir_dcol):
     """COTAT+ outlet pixel for cell (i, j) using the MUFP selection scheme.
@@ -170,18 +200,23 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
     c0 = j * kx
 
     # Step 1: pixel with the largest upstream drainage area.
-    lr1, lc1 = _largest_valid_in_cell(flowdir, flowacc, i, j, kx, ky,
-                                      orig_nrows, orig_ncols, flowdir_ndv, has_ndv)
+    lr1, lc1 = _largest_valid_in_cell(
+        flowdir, flowacc, i, j, kx, ky,
+        orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+        fa_ndv, fa_has_ndv, fa_ndv_is_nan)
 
-    # Collect border out-facing pixels (valid flow direction leaving the cell).
+    # Border pixels are those whose direction leaves the logical ky×kx cell.
+    # The scan itself stops at the raster edge.
     cap = 2 * (kx + ky)
     bo_r = np.empty(cap, dtype=np.int64)
     bo_c = np.empty(cap, dtype=np.int64)
     bo_fa = np.empty(cap, dtype=np.float64)
     exit_map = np.full(kx * ky, -1, dtype=np.int64)
     nb = 0
-    for r in range(r0, r0 + ky):
-        for c in range(c0, c0 + kx):
+    r1 = min(r0 + ky, orig_nrows)
+    c1 = min(c0 + kx, orig_ncols)
+    for r in range(r0, r1):
+        for c in range(c0, c1):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
@@ -196,7 +231,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
             if dr2 < r0 or dr2 >= r0 + ky or dc2 < c0 or dc2 >= c0 + kx:
                 bo_r[nb] = r
                 bo_c[nb] = c
-                bo_fa[nb] = np.float64(flowacc[r, c])
+                bo_fa[nb] = _fa(flowacc, r, c, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
                 exit_map[(r - r0) * kx + (c - c0)] = nb
                 nb += 1
 
@@ -213,8 +248,8 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
 
     # Step 2: border out-facing pixel draining the largest portion of the cell.
     counts = np.zeros(nb, dtype=np.int64)
-    for r in range(r0, r0 + ky):
-        for c in range(c0, c0 + kx):
+    for r in range(r0, r1):
+        for c in range(c0, c1):
             if not _pixel_valid(flowdir, r, c, orig_nrows, orig_ncols,
                                 flowdir_ndv, has_ndv):
                 continue
@@ -227,6 +262,10 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
                 idx = exit_map[(cr - r0) * kx + (cc - c0)]
                 if idx >= 0:
                     counts[idx] += 1
+                    break
+                # Inside the logical cell, past the raster edge: not a pixel.
+                if not _pixel_valid(flowdir, cr, cc, orig_nrows, orig_ncols,
+                                    flowdir_ndv, has_ndv):
                     break
                 f = flowdir[cr, cc]
                 if f < 1 or f > 128:
@@ -263,6 +302,7 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
         path = _trace_upstream_within_cell(
             flowdir, flowacc, np.intp(bo_r[sel]), np.intp(bo_c[sel]), i, j, kx, ky,
             orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+            fa_ndv, fa_has_ndv, fa_ndv_is_nan,
             row_dists,
             decode_dr, decode_dc, decode_valid, dir_drow, dir_dcol)
         if path > mufp:
@@ -274,8 +314,35 @@ def _find_cell_outlet_mufp(flowdir, flowacc, i, j, kx, ky,
 
 
 @njit(cache=True, parallel=True)
+def _null_cells(fd, mrows, mcols, kx, ky, nrows, ncols):
+    """True where a coarse cell has no in-extent, non-nodata flow-direction pixel.
+
+    Cell ``(i, j)`` covers rows ``[i*ky, i*ky+ky)`` and columns
+    ``[j*kx, j*kx+kx)``, clamped to ``nrows`` / ``ncols``. Pixels outside
+    the original raster and pixels equal to 255 do not count. The scan
+    stops at the first pixel that does.
+    """
+    out = np.empty((mrows, mcols), dtype=np.bool_)
+    for i in prange(mrows):
+        r1 = min(i * ky + ky, nrows)
+        for j in range(mcols):
+            c1 = min(j * kx + kx, ncols)
+            null = True
+            for r in range(i * ky, r1):
+                for c in range(j * kx, c1):
+                    if fd[r, c] != 255:
+                        null = False
+                        break
+                if not null:
+                    break
+            out[i, j] = null
+    return out
+
+
+@njit(cache=True, parallel=True)
 def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcols, kx, ky,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                        fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                         use_mufp, mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol):
     """Assign outlet pixels for all non-null cells (parallel over rows).
@@ -290,10 +357,13 @@ def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcol
                     r, c = _find_cell_outlet_mufp(
                         flowdir, flowacc, i, j, kx, ky,
                         orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                        fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                         mufp, row_dists, decode_dr, decode_dc, decode_valid,
                         dir_drow, dir_dcol)
                 else:
-                    r, c = _find_largest_in_cell(flowacc, i, j, kx, ky)
+                    r, c = _find_largest_in_cell(
+                        flowacc, i, j, kx, ky, orig_nrows, orig_ncols,
+                        fa_ndv, fa_has_ndv, fa_ndv_is_nan)
                 outlet_coords[i, j, 0] = r
                 outlet_coords[i, j, 1] = c
 
@@ -301,6 +371,7 @@ def _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords, mrows, mcol
 @njit(cache=True)
 def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, kx, ky,
                           orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                          fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                           area_threshold, decode_dr, decode_dc, decode_valid,
                           encode_dir):
     """Trace flow downstream from a cell's outlet pixel; return its D8 direction.
@@ -314,7 +385,7 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, kx, ky,
     """
     cur_r = np.intp(outlet_coords[ci, cj, 0])
     cur_c = np.intp(outlet_coords[ci, cj, 1])
-    source_outlet_area = np.float64(flowacc[cur_r, cur_c])
+    source_outlet_area = _fa(flowacc, cur_r, cur_c, fa_ndv, fa_has_ndv, fa_ndv_is_nan)
 
     recv_ci = np.intp(-1)
     recv_cj = np.intp(-1)
@@ -353,7 +424,7 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, kx, ky,
         out_r = np.intp(outlet_coords[cur_ci, cur_cj, 0])
         out_c = np.intp(outlet_coords[cur_ci, cur_cj, 1])
         if out_r == cur_r and out_c == cur_c:
-            dA = np.float64(flowacc[cur_r, cur_c]) - source_outlet_area
+            dA = _fa(flowacc, cur_r, cur_c, fa_ndv, fa_has_ndv, fa_ndv_is_nan) - source_outlet_area
             if dA > area_threshold:
                 recv_ci = cur_ci
                 recv_cj = cur_cj
@@ -373,6 +444,7 @@ def _trace_cell_direction(flowdir, flowacc, outlet_coords, ci, cj, kx, ky,
 @njit(cache=True, parallel=True)
 def _assign_all_directions(flowdir, flowacc, outlet_coords, cells, null_cells,
                            kx, ky, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                           fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                            area_threshold, decode_dr, decode_dc, decode_valid,
                            encode_dir, mrows, mcols):
     """Assign D8 directions for all non-null cells (parallel over rows)."""
@@ -382,19 +454,25 @@ def _assign_all_directions(flowdir, flowacc, outlet_coords, cells, null_cells,
                 cells[i, j] = _trace_cell_direction(
                     flowdir, flowacc, outlet_coords, i, j, kx, ky,
                     orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+                    fa_ndv, fa_has_ndv, fa_ndv_is_nan,
                     area_threshold, decode_dr, decode_dc, decode_valid,
                     encode_dir)
 
 
 @njit(cache=True)
-def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
-    """Fix diagonal flow intersections."""
+def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols,
+                             fa_ndv, fa_has_ndv, fa_ndv_is_nan):
+    """Fix diagonal flow intersections.
+
+    Outlet areas go through ``_fa``, so nodata accumulation compares as 0.
+    """
     for i in range(mrows - 1):
         for j in range(mcols - 1):
             if cells[i + 1, j] == 128 and cells[i + 1, j + 1] == 32:
                 r0, c0 = outlet_coords[i, j, 0], outlet_coords[i, j, 1]
                 r1, c1 = outlet_coords[i, j + 1, 0], outlet_coords[i, j + 1, 1]
-                if flowacc[r0, c0] > flowacc[r1, c1]:
+                if _fa(flowacc, r0, c0, fa_ndv, fa_has_ndv, fa_ndv_is_nan) > _fa(
+                        flowacc, r1, c1, fa_ndv, fa_has_ndv, fa_ndv_is_nan):
                     cells[i + 1, j] = 64
                 else:
                     cells[i + 1, j + 1] = 64
@@ -402,7 +480,8 @@ def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
             if cells[i, j] == 2 and cells[i, j + 1] == 8:
                 r0, c0 = outlet_coords[i + 1, j + 1, 0], outlet_coords[i + 1, j + 1, 1]
                 r1, c1 = outlet_coords[i + 1, j, 0], outlet_coords[i + 1, j, 1]
-                if flowacc[r0, c0] > flowacc[r1, c1]:
+                if _fa(flowacc, r0, c0, fa_ndv, fa_has_ndv, fa_ndv_is_nan) > _fa(
+                        flowacc, r1, c1, fa_ndv, fa_has_ndv, fa_ndv_is_nan):
                     cells[i, j + 1] = 4
                 else:
                     cells[i, j] = 4
@@ -410,7 +489,8 @@ def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
             if cells[i, j + 1] == 8 and cells[i + 1, j + 1] == 32:
                 r0, c0 = outlet_coords[i, j, 0], outlet_coords[i, j, 1]
                 r1, c1 = outlet_coords[i + 1, j, 0], outlet_coords[i + 1, j, 1]
-                if flowacc[r0, c0] > flowacc[r1, c1]:
+                if _fa(flowacc, r0, c0, fa_ndv, fa_has_ndv, fa_ndv_is_nan) > _fa(
+                        flowacc, r1, c1, fa_ndv, fa_has_ndv, fa_ndv_is_nan):
                     cells[i, j + 1] = 16
                 else:
                     cells[i + 1, j + 1] = 16
@@ -418,7 +498,8 @@ def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
             if cells[i, j] == 2 and cells[i + 1, j] == 128:
                 r0, c0 = outlet_coords[i, j + 1, 0], outlet_coords[i, j + 1, 1]
                 r1, c1 = outlet_coords[i + 1, j + 1, 0], outlet_coords[i + 1, j + 1, 1]
-                if flowacc[r0, c0] > flowacc[r1, c1]:
+                if _fa(flowacc, r0, c0, fa_ndv, fa_has_ndv, fa_ndv_is_nan) > _fa(
+                        flowacc, r1, c1, fa_ndv, fa_has_ndv, fa_ndv_is_nan):
                     cells[i, j] = 1
                 else:
                     cells[i + 1, j] = 1
@@ -429,7 +510,11 @@ def _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols):
 # =========================================================================
 
 def _warmup(dtype=np.float64):
-    """Pre-compile all numba kernels for *dtype*."""
+    """Pre-compile all numba kernels for *dtype*.
+
+    Compiles the sentinel path (a zero of *dtype* marks one pixel nodata).
+    The NaN branch lives in the same ``_fa`` kernel, so this covers both.
+    """
     flowdir_ndv = np.uint8(255)
 
     # Plain COTAT outlets + tracing + intersection fixing (2x2 cell grid).
@@ -439,20 +524,25 @@ def _warmup(dtype=np.float64):
     n_cols = mcols * kx
     flowdir = np.zeros((n_rows, n_cols), dtype=np.uint8)
     flowacc = np.ones((n_rows, n_cols), dtype=dtype)
-    null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
+    fa_ndv = flowacc.dtype.type(0)
+    flowacc[0, 0] = fa_ndv
+    null_cells = _null_cells(flowdir, mrows, mcols, kx, ky, n_rows, n_cols)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     cells = np.full((mrows, mcols), 255, dtype=np.uint8)
     row_dists = np.ones((n_rows, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
                         mrows, mcols, kx, ky, n_rows, n_cols, flowdir_ndv, True,
+                        fa_ndv, True, False,
                         False, 0.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
     _assign_all_directions(flowdir, flowacc, outlet_coords, cells,
                            null_cells, kx, ky, n_rows, n_cols, flowdir_ndv, True,
+                           fa_ndv, True, False,
                            0.0, DECODE_DR, DECODE_DC, DECODE_VALID,
                            ENCODE_DIR, mrows, mcols)
-    _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols)
+    _fix_intersections_numba(cells, outlet_coords, flowacc, mrows, mcols,
+                             fa_ndv, True, False)
 
     # COTAT+ MUFP outlet selection (single 1x1 coarse cell with kx=ky=2).
     kx = ky = 2
@@ -460,12 +550,14 @@ def _warmup(dtype=np.float64):
     n_rows = n_cols = 2
     flowdir = np.ones((n_rows, n_cols), dtype=np.uint8)
     flowacc = np.array([[1, 2], [1, 2]], dtype=dtype)
+    fa_ndv = flowacc.dtype.type(0)
     null_cells = np.zeros((mrows, mcols), dtype=np.bool_)
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     row_dists = np.ones((n_rows, 8), dtype=np.float64) * 1000.0
 
     _assign_all_outlets(flowdir, flowacc, null_cells, outlet_coords,
                         mrows, mcols, kx, ky, n_rows, n_cols, flowdir_ndv, True,
+                        fa_ndv, True, False,
                         True, 500.0, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
                         DIR_DROW, DIR_DCOL)
 
@@ -518,12 +610,17 @@ def COTAT(
 
     Notes
     -----
-    Both input arrays are copied into ``(ceil(H/ky)*ky, ceil(W/kx)*kx)``
-    buffers before being passed to the JIT kernels.  The flowdir buffer is
-    filled with 255 (nodata sentinel) and the flowacc buffer with 0 in the
-    padded region.  The ``_pixel_valid`` kernel helper still uses
-    ``orig_nrows / orig_ncols`` for bounds checking so padded pixels are
-    correctly excluded.
+    Both inputs are read in place; nothing is copied or padded. Coarse
+    shape is ``(ceil(H/ky), ceil(W/kx))``. Scans stop at the raster edge,
+    so a partial boundary cell only visits pixels that exist. Cell-exit
+    tests still use the full logical window ``[i*ky, i*ky+ky)`` by
+    ``[j*kx, j*kx+kx)``: a fine step that would have landed on the old
+    padded border stays inside the cell and is not an outlet.
+    Flow-accumulation nodata is read as 0 inside the kernels (NaN by a
+    self-inequality, every other sentinel by a comparison in the array
+    dtype; the sentinel is cast with ``fa.dtype.type`` first, which keeps
+    uint64/int64 values exact). A coarse cell is null when every in-extent
+    pixel is flow-direction nodata (255).
     """
     check_type(flowdir, GridType.FlowDir)
     check_type(flowacc, GridType.FlowAcc)
@@ -534,37 +631,29 @@ def COTAT(
     kx, ky = normalize_k(k)
 
     orig_nrows, orig_ncols = flowdir.shape
+    mrows = math.ceil(orig_nrows / ky)
+    mcols = math.ceil(orig_ncols / kx)
 
-    # Allocate ceil-padded buffers.  Extra cells are nodata (fd=255, fa=0).
-    ceil_rows = math.ceil(orig_nrows / ky)
-    ceil_cols = math.ceil(orig_ncols / kx)
-    pad_rows  = ceil_rows * ky
-    pad_cols  = ceil_cols * kx
-    mrows     = ceil_rows
-    mcols     = ceil_cols
-
-    fd_buf = np.full((pad_rows, pad_cols), np.uint8(255), dtype=np.uint8)
-    fd_buf[:orig_nrows, :orig_ncols] = flowdir.array
-
+    fd = flowdir.array
+    fa = flowacc.array
     ndv = flowacc.meta.nodata
-    fa  = flowacc.array.copy()
-    if ndv is not None:
-        if isinstance(ndv, float) and np.isnan(ndv):
-            fa[np.isnan(fa)] = 0
-        else:
-            fa[fa == ndv] = 0
+    # Same-dtype sentinel. Unused when fa_has_ndv is false; a NaN nodata is
+    # detected with ``val != val``, so the scalar itself is a dummy zero.
+    if ndv is None:
+        fa_ndv = fa.dtype.type(0)
+        fa_has_ndv = False
+        fa_ndv_is_nan = False
+    elif isinstance(ndv, float) and np.isnan(ndv):
+        fa_ndv = fa.dtype.type(0)
+        fa_has_ndv = True
+        fa_ndv_is_nan = True
+    else:
+        fa_ndv = fa.dtype.type(ndv)
+        fa_has_ndv = True
+        fa_ndv_is_nan = False
 
-    fa_buf = np.zeros((pad_rows, pad_cols), dtype=flowacc.array.dtype)
-    fa_buf[:orig_nrows, :orig_ncols] = fa
-
-    # Build coarse null-cell mask: a cell is null when all its fine pixels
-    # are either in the padded region or carry flowdir nodata (255).
-    valid = np.zeros((pad_rows, pad_cols), dtype=bool)
-    valid[:orig_nrows, :orig_ncols] = fd_buf[:orig_nrows, :orig_ncols] != 255
-    null_cells = ~np.any(
-        valid.reshape(mrows, ky, mcols, kx), axis=(1, 3)
-    )
-    del valid
+    # A cell is null when every in-extent fine pixel is flowdir nodata.
+    null_cells = _null_cells(fd, mrows, mcols, kx, ky, orig_nrows, orig_ncols)
 
     flowdir_ndv = np.uint8(255)
     has_ndv     = True
@@ -574,30 +663,33 @@ def COTAT(
 
     row_dists = row_distance_table(
         flowdir.meta.transform,
-        pad_rows,
+        orig_nrows,
         geographic=flowdir.meta.is_geographic,
     )
 
     outlet_coords = np.full((mrows, mcols, 2), -1, dtype=np.int32)
     _assign_all_outlets(
-        fd_buf, fa_buf, null_cells, outlet_coords,
+        fd, fa, null_cells, outlet_coords,
         mrows, mcols, kx, ky, orig_nrows, orig_ncols, flowdir_ndv, has_ndv,
+        fa_ndv, fa_has_ndv, fa_ndv_is_nan,
         use_mufp, mufp_val, row_dists, DECODE_DR, DECODE_DC, DECODE_VALID,
         DIR_DROW, DIR_DCOL,
     )
 
     cells = np.full((mrows, mcols), np.uint8(255), dtype=np.uint8)
     _assign_all_directions(
-        fd_buf, fa_buf, outlet_coords,
+        fd, fa, outlet_coords,
         cells, null_cells, kx, ky, orig_nrows, orig_ncols,
-        flowdir_ndv, has_ndv, area_threshold,
+        flowdir_ndv, has_ndv, fa_ndv, fa_has_ndv, fa_ndv_is_nan,
+        area_threshold,
         DECODE_DR, DECODE_DC, DECODE_VALID, ENCODE_DIR,
         mrows, mcols,
     )
 
     del null_cells
 
-    _fix_intersections_numba(cells, outlet_coords, fa_buf, mrows, mcols)
+    _fix_intersections_numba(cells, outlet_coords, fa, mrows, mcols,
+                             fa_ndv, fa_has_ndv, fa_ndv_is_nan)
 
     t = flowdir.meta.transform
     out_transform = Affine(t.a * kx, t.b, t.c, t.d, t.e * ky, t.f)

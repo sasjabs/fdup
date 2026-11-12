@@ -112,25 +112,34 @@ class Grid:
         Coerces *array* to the canonical dtype for *type* where possible,
         remaps nodata for FlowDir, and fills in a sensible nodata default
         when the caller omits the argument.
+
+        When *array* already has the canonical dtype, the grid stores that
+        same array for FlowDir, Mask, Tree, and Strahler, as it does for
+        FlowAcc and DEM. Writing either object is visible on the other.
+        A FlowDir remap of a caller-supplied nodata other than 255 allocates
+        a new array with ``np.where`` and leaves the input untouched.
         """
         array = np.asarray(array)
         input_dtype = array.dtype
 
         # --- dtype coercion / validation ---
         if type == GridType.FlowDir:
-            array = array.astype(np.uint8)
+            # copy=False aliases the caller when the dtype already matches.
+            # The np.where remap below still allocates, so a non-255 nodata
+            # never writes into a caller-owned buffer.
+            array = array.astype(np.uint8, copy=False)
             # Remap any caller-supplied nodata to the canonical sentinel 255
             if nodata is not ... and nodata is not None and nodata != 255:
                 array = np.where(array == nodata, np.uint8(255), array)
 
         elif type == GridType.Mask:
-            array = array.astype(np.bool_)
+            array = array.astype(np.bool_, copy=False)
 
         elif type == GridType.Tree:
-            array = array.astype(np.uint32)
+            array = array.astype(np.uint32, copy=False)
 
         elif type == GridType.Strahler:
-            array = array.astype(np.uint8)
+            array = array.astype(np.uint8, copy=False)
 
         else:
             # DEM / FlowAcc: keep input dtype if it is in the allowed set

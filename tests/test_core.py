@@ -39,6 +39,21 @@ class TestGridCreate:
         assert g.array[0, 1] == 255
         assert g.array[1, 0] == 255
         assert g.meta.nodata == 255
+        # Remap allocates; the caller buffer stays intact.
+        np.testing.assert_array_equal(arr, np.array([[1, 0], [0, 1]], dtype=np.uint8))
+
+    def test_matching_dtype_aliases_caller_array(self):
+        cases = [
+            (np.arange(4, dtype=np.uint8).reshape(2, 2), GridType.FlowDir),
+            (np.array([[True, False], [False, True]]), GridType.Mask),
+            (np.ones((2, 2), dtype=np.uint32), GridType.Tree),
+            (np.arange(4, dtype=np.uint8).reshape(2, 2), GridType.Strahler),
+            (np.ones((2, 2), dtype=np.float32), GridType.FlowAcc),
+            (np.ones((2, 2), dtype=np.float64), GridType.DEM),
+        ]
+        for arr, grid_type in cases:
+            g = Grid.create(arr, grid_type, GEO_TRANSFORM)
+            assert g.array is arr
 
     def test_mask_cast_to_bool(self):
         arr = np.array([[0, 1], [2, 0]], dtype=np.int32)

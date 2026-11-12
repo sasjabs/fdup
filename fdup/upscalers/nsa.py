@@ -6,8 +6,6 @@ https://doi.org/10.1029/2001WR900024
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 from affine import Affine
 from numba import njit
@@ -46,28 +44,41 @@ def _dir_distances(kx: int, ky: int) -> np.ndarray:
 # =========================================================================
 
 @njit(cache=True)
-def _aggregate_jit(flowacc_array, nodata_mask, kx, ky):
-    """MAX-aggregate *flowacc_array* into coarse cells of size (*ky*, *kx*).
+def _aggregate_jit(fa, ndv, has_ndv, ndv_is_nan, kx, ky):
+    """MAX-aggregate *fa* into coarse cells of size (*ky*, *kx*).
 
-    A coarse cell covers *ky* fine rows by *kx* fine columns.
-    Works for uint32, float32 and float64 inputs.
+    Output shape is ``(ceil(H/ky), ceil(W/kx))``. Each window is clamped with
+    ``min(i*ky+ky, H)`` / ``min(j*kx+kx, W)``, so partial edge cells are the
+    max of the pixels that exist. Nodata is tested inline on the raw value:
+    NaN by ``val != val``, any other sentinel by ``val == ndv`` in *fa*'s
+    dtype. *ndv* is ignored when *has_ndv* is false; pass a zero of *fa*'s
+    dtype in that case. A window with no valid pixel is nodata.
     """
-    krows = flowacc_array.shape[0] // ky
-    kcols = flowacc_array.shape[1] // kx
-    flowacc_aggr = np.zeros((krows, kcols), dtype=flowacc_array.dtype)
-    nodata_aggr  = np.zeros((krows, kcols), dtype=np.bool_)
+    H = fa.shape[0]
+    W = fa.shape[1]
+    krows = (H + ky - 1) // ky
+    kcols = (W + kx - 1) // kx
+    flowacc_aggr = np.zeros((krows, kcols), dtype=fa.dtype)
+    nodata_aggr = np.zeros((krows, kcols), dtype=np.bool_)
 
     for i in range(krows):
+        r1 = min(i * ky + ky, H)
         for j in range(kcols):
+            c1 = min(j * kx + kx, W)
             found_valid = False
-            max_val = flowacc_array[i * ky, j * kx]
-            for di in range(ky):
-                for dj in range(kx):
-                    if not nodata_mask[i * ky + di, j * kx + dj]:
-                        val = flowacc_array[i * ky + di, j * kx + dj]
-                        if (not found_valid) or (val > max_val):
-                            max_val = val
-                            found_valid = True
+            max_val = ndv
+            for r in range(i * ky, r1):
+                for c in range(j * kx, c1):
+                    val = fa[r, c]
+                    if has_ndv:
+                        if ndv_is_nan:
+                            if val != val:
+                                continue
+                        elif val == ndv:
+                            continue
+                    if (not found_valid) or (val > max_val):
+                        max_val = val
+                        found_valid = True
             if found_valid:
                 flowacc_aggr[i, j] = max_val
             else:
@@ -121,16 +132,20 @@ def _flowdir_jit(flowacc_aggr, nodata_aggr,
 # =========================================================================
 
 def _warmup(dtype=np.float64):
-    """Trigger JIT compilation for the given *dtype*."""
+    """Trigger JIT compilation for the given *dtype*.
+
+    Compiles the sentinel path (a zero of *dtype* marks one pixel nodata).
+    The NaN branch is part of the same kernel, so this covers both flags.
+    """
     kx = ky = 2
     mock_fa = np.array([[1,  2,  3,  4],
                          [5,  6,  7,  8],
                          [9,  10, 11, 12],
                          [13, 14, 15, 16]], dtype=dtype)
-    mock_nd = np.zeros((4, 4), dtype=np.bool_)
-    mock_nd[0, 0] = True
+    ndv = mock_fa.dtype.type(0)
+    mock_fa[0, 0] = ndv
     dir_dist = _dir_distances(kx, ky)
-    aggr, nd = _aggregate_jit(mock_fa, mock_nd, kx, ky)
+    aggr, nd = _aggregate_jit(mock_fa, ndv, True, False, kx, ky)
     _flowdir_jit(aggr, nd, DIR_DROW, DIR_DCOL, dir_dist, DIR_CODES)
 
 
@@ -165,10 +180,14 @@ def NSA(flowacc: Grid, k: int | tuple[int, int]) -> Grid:
 
     Notes
     -----
-    The fine-grid array is pre-copied into a
-    ``(ceil(H/ky)*ky, ceil(W/kx)*kx)`` buffer filled with zeros (nodata
-    sentinel = 0).  Partial boundary cells beyond the original extent are
-    marked nodata via the nodata-mask buffer (filled with ``True``).
+    The fine array is read in place. Coarse shape is
+    ``(ceil(H/ky), ceil(W/kx))``; each window stops at the raster edge, so
+    partial boundary cells contribute only the pixels that exist. Nodata is
+    skipped inside the aggregate kernel: NaN by a self-inequality, every
+    other sentinel by a comparison in the array dtype (the sentinel is cast
+    with ``fa.dtype.type`` first, which keeps uint64/int64 values exact).
+    A window with no valid pixel is nodata. New storage is the coarse
+    accumulation, its nodata mask, and the flow-direction result.
 
     Rectangular coarse cells weight cardinal vs diagonal neighbours using
     ``hypot(drow*ky, dcol*kx)`` inter-cell distances; square cells reuse the
@@ -179,32 +198,26 @@ def NSA(flowacc: Grid, k: int | tuple[int, int]) -> Grid:
     check_dtype(flowacc, allowed=_FLOWACC_DTYPES)
     kx, ky = normalize_k(k)
 
-    H, W   = flowacc.array.shape
-    ndv    = flowacc.meta.nodata
-
-    # Build nodata_mask for the original array.
+    fa = flowacc.array
+    ndv = flowacc.meta.nodata
+    # Same-dtype sentinel. Unused when has_ndv is false; a NaN nodata is
+    # detected with ``val != val``, so the scalar itself is a dummy zero.
     if ndv is None:
-        nodata_mask = np.zeros((H, W), dtype=bool)
+        ndv_scalar = fa.dtype.type(0)
+        has_ndv = False
+        ndv_is_nan = False
     elif isinstance(ndv, float) and np.isnan(ndv):
-        nodata_mask = np.isnan(flowacc.array)
+        ndv_scalar = fa.dtype.type(0)
+        has_ndv = True
+        ndv_is_nan = True
     else:
-        nodata_mask = flowacc.array == ndv
+        ndv_scalar = fa.dtype.type(ndv)
+        has_ndv = True
+        ndv_is_nan = False
 
-    # Pre-allocate ceil-padded buffers.  Extra cells beyond the original
-    # extent are treated as nodata (nd_buf=True, fa_buf=0).
-    ceil_rows = math.ceil(H / ky)
-    ceil_cols = math.ceil(W / kx)
-
-    fa_zeroed = flowacc.array.copy()
-    fa_zeroed[nodata_mask] = 0
-
-    fa_buf = np.zeros((ceil_rows * ky, ceil_cols * kx), dtype=flowacc.array.dtype)
-    nd_buf = np.ones((ceil_rows * ky, ceil_cols * kx), dtype=np.bool_)
-
-    fa_buf[:H, :W] = fa_zeroed
-    nd_buf[:H, :W] = nodata_mask
-
-    flowacc_aggr, nodata_aggr = _aggregate_jit(fa_buf, nd_buf, kx, ky)
+    flowacc_aggr, nodata_aggr = _aggregate_jit(
+        fa, ndv_scalar, has_ndv, ndv_is_nan, kx, ky,
+    )
 
     dir_dist = _dir_distances(kx, ky)
     cells = _flowdir_jit(
